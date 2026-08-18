@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c ' *)",
+      "Bash(export PYTHONIOENCODING=utf-8)",
+      "Read(//tmp/**)",
+      "Bash(tee /tmp/diff_report.txt)"
+    ]
+  }
+}
