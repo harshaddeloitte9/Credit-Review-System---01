@@ -178,7 +178,10 @@ def inject_theme():
             color: #ffffff;
             font-weight: 600;
         }}
-        [data-testid="stSidebar"] div[role="radiogroup"] label:nth-of-type(1)::before {{
+        [data-testid="stSidebar"] div[role="radiogroup"] label:nth-of-type(2) {{
+            margin-top: 0.6rem;
+        }}
+        [data-testid="stSidebar"] div[role="radiogroup"] label:nth-of-type(2)::before {{
             content: "Credit Analysis";
             display: block;
             font-size: 0.66rem;
@@ -186,14 +189,14 @@ def inject_theme():
             letter-spacing: 0.09em;
             text-transform: uppercase;
             color: {SIDEBAR_MUTED};
-            margin: 0 0 0.45rem 0.55rem;
+            margin: 0.4rem 0 0.45rem 0.55rem;
         }}
-        [data-testid="stSidebar"] div[role="radiogroup"] label:nth-of-type(6) {{
+        [data-testid="stSidebar"] div[role="radiogroup"] label:nth-of-type(7) {{
             margin-top: 1rem;
             padding-top: 1rem;
             border-top: 1px solid rgba(255,255,255,0.10);
         }}
-        [data-testid="stSidebar"] div[role="radiogroup"] label:nth-of-type(6)::before {{
+        [data-testid="stSidebar"] div[role="radiogroup"] label:nth-of-type(7)::before {{
             content: "Decisioning & Monitoring";
             display: block;
             font-size: 0.66rem;
@@ -476,6 +479,57 @@ def inject_theme():
             margin-right: auto;
         }}
 
+        /* ---------------- Data Upload: document cards & flow ---------------- */
+        .cr-doc-icon {{
+            width: 44px;
+            height: 44px;
+            border-radius: 10px;
+            background: {SURFACE_PAGE};
+            border: 1px solid {BORDER};
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 800;
+            font-size: 0.68rem;
+            color: {INK_SECONDARY};
+            flex-shrink: 0;
+        }}
+        .cr-flow-row {{
+            display: flex;
+            align-items: center;
+            gap: 0.8rem;
+            flex-wrap: wrap;
+            background: {SURFACE};
+            border: 1px solid {BORDER};
+            border-radius: 12px;
+            padding: 1.1rem 1.3rem;
+        }}
+        .cr-flow-step {{
+            flex: 1 1 160px;
+            text-align: center;
+        }}
+        .cr-flow-dot {{
+            width: 10px;
+            height: 10px;
+            border-radius: 999px;
+            margin: 0 auto 0.4rem auto;
+        }}
+        .cr-flow-title {{
+            font-weight: 700;
+            font-size: 0.88rem;
+            color: {INK_PRIMARY};
+        }}
+        .cr-flow-sub {{
+            font-size: 0.76rem;
+            color: {INK_MUTED};
+            margin-top: 0.15rem;
+        }}
+        .cr-flow-arrow {{
+            font-size: 1.3rem;
+            color: {INK_MUTED};
+            flex: 0 0 auto;
+        }}
+
         div[data-testid="stExpander"] {{
             border: 1px solid {BORDER};
             border-radius: 10px;
@@ -703,6 +757,25 @@ def render_validation_summary(rows):
         ))
     render_kpi_row(cards, columns_per_row=3)
     return matches, discrepancies, not_comparable
+
+
+def render_flow_steps(steps):
+    """steps: list of (title, subtitle, status_kind) tuples, rendered as a
+    compact horizontal flow with arrow connectors - e.g. Source Document
+    -> Extraction -> Extracted Data. A status strip, not a chart."""
+    parts = []
+    for i, (title, subtitle, kind) in enumerate(steps):
+        colors = STATUS.get(kind, STATUS["neutral"])
+        if i > 0:
+            parts.append('<div class="cr-flow-arrow">→</div>')
+        parts.append(
+            '<div class="cr-flow-step">'
+            f'<div class="cr-flow-dot" style="background:{colors["bg"]};"></div>'
+            f'<div class="cr-flow-title">{title}</div>'
+            f'<div class="cr-flow-sub">{subtitle}</div>'
+            "</div>"
+        )
+    st.markdown(f'<div class="cr-flow-row">{"".join(parts)}</div>', unsafe_allow_html=True)
 
 
 def render_underdev(area_label, sheet_hint):

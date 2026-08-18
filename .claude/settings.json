@@ -4,7 +4,21 @@
       "Bash(python -c ' *)",
       "Bash(export PYTHONIOENCODING=utf-8)",
       "Read(//tmp/**)",
-      "Bash(tee /tmp/diff_report.txt)"
+      "Bash(tee /tmp/diff_report.txt)",
+      "Bash(python -m py_compile test_dynamic_data.py)",
+      "Bash(python test_dynamic_data.py)",
+      "Bash(python -m py_compile app.py)",
+      "Bash(pkill -f \"streamlit run\")",
+      "Bash(git checkout *)",
+      "Bash(python -m py_compile app.py ui_theme.py)",
+      "Bash(SCRATCH=\"/c/Users/adeha/AppData/Local/Temp/claude/c--Credit-Review-Tool/cce29f1d-cb28-4190-a6fe-f07037ac54af/scratchpad\" *)",
+      "Read(//c/Users/adeha/AppData/Local/Temp/claude/c--Credit-Review-Tool/cce29f1d-cb28-4190-a6fe-f07037ac54af/scratchpad/**)",
+      "Bash(curl -s http://localhost:8610/_stcore/health -w \"\\\\nHTTP: %{http_code}\\\\n\")",
+      "Bash(python \"C:\\\\Users\\\\adeha\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Credit-Review-Tool\\\\cce29f1d-cb28-4190-a6fe-f07037ac54af\\\\scratchpad\\\\test_advanced_gate.py\")",
+      "Bash(cp \"C:\\\\Users\\\\adeha\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Credit-Review-Tool\\\\cce29f1d-cb28-4190-a6fe-f07037ac54af\\\\scratchpad\\\\test_advanced_gate.py\" \"./_tmp_test_advanced_gate.py\")",
+      "Bash(python \"./_tmp_test_advanced_gate.py\")",
+      "Bash(cp \"C:\\\\Users\\\\adeha\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Credit-Review-Tool\\\\cce29f1d-cb28-4190-a6fe-f07037ac54af\\\\scratchpad\\\\test_all_pages.py\" \"./_tmp_test_all_pages.py\")",
+      "Bash(python \"./_tmp_test_all_pages.py\")"
     ]
   }
 }

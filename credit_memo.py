@@ -45,31 +45,59 @@ class CreditMemoResult:
     areas: list
 
 
+_NARRATIVE_UNAVAILABLE = (
+    "Reference workbook commentary — not dynamically generated. This workbook has no "
+    "'9 - Credit Memo' narrative for this area."
+)
+
+
 def load_credit_memo_commentary(workbook_path) -> dict:
-    ws = load_workbook(workbook_path, data_only=True)[CREDIT_MEMO_SHEET]
+    """Returns a dict with all 7 keys always present; a value is the
+    unavailable-placeholder string (never None, never Tata Steel's text)
+    if the '9 - Credit Memo' sheet or that specific cell is missing from
+    this workbook."""
+    wb = load_workbook(workbook_path, data_only=True)
+    if CREDIT_MEMO_SHEET not in wb.sheetnames:
+        return {key: _NARRATIVE_UNAVAILABLE for key in (
+            "financial_analysis", "risk_scoring", "covenants", "collateral_assessment",
+            "limit_setting", "continuous_monitoring", "portfolio_monitoring",
+        )}
+    ws = wb[CREDIT_MEMO_SHEET]
+
+    def _cell(coord):
+        value = ws[coord].value
+        return str(value) if value not in (None, "") else _NARRATIVE_UNAVAILABLE
+
     return {
-        "financial_analysis": str(ws["A4"].value),
-        "risk_scoring": str(ws["A8"].value),
-        "covenants": str(ws["A12"].value),
-        "collateral_assessment": str(ws["A16"].value),
-        "limit_setting": str(ws["A20"].value),
-        "continuous_monitoring": str(ws["A24"].value),
-        "portfolio_monitoring": str(ws["A28"].value),
+        "financial_analysis": _cell("A4"),
+        "risk_scoring": _cell("A8"),
+        "covenants": _cell("A12"),
+        "collateral_assessment": _cell("A16"),
+        "limit_setting": _cell("A20"),
+        "continuous_monitoring": _cell("A24"),
+        "portfolio_monitoring": _cell("A28"),
     }
 
 
 def build_credit_memo(fa, risk, covenants_result, collateral_result, limit_result,
                        monitoring_result, portfolio_result, commentary: dict) -> CreditMemoResult:
+    """collateral_result / portfolio_result may be None when
+    collateral_assessment.load_collateral_inputs / portfolio_monitoring.
+    load_portfolio_inputs found no data for this workbook (see their own
+    docstrings) - shown as "Not available" here rather than crashing or
+    silently reusing a stale/other borrower's result."""
     limit_conclusion = limit_result.conclusion if isinstance(limit_result.conclusion, str) else "FALSE"
+    collateral_status = collateral_result.rating if collateral_result else "Not available"
+    portfolio_status = portfolio_result.overall_status if portfolio_result else "Not available"
 
     areas = [
         CreditMemoArea("Area 2 - Financial Analysis & Interpretation", fa.overall_status, commentary["financial_analysis"]),
         CreditMemoArea("Area 3 - Risk Scoring", risk.overall_status, commentary["risk_scoring"]),
         CreditMemoArea("Area 4 - Covenant Monitoring", covenants_result.overall_status, commentary["covenants"]),
-        CreditMemoArea("Area 5 - Collateral Assessment", collateral_result.rating, commentary["collateral_assessment"]),
+        CreditMemoArea("Area 5 - Collateral Assessment", collateral_status, commentary["collateral_assessment"]),
         CreditMemoArea("Area 6 - Proposed Loan Impact & Limit Recommendation", limit_conclusion, commentary["limit_setting"]),
         CreditMemoArea("Area 7 - Continuous Monitoring", monitoring_result.overall_status, commentary["continuous_monitoring"]),
-        CreditMemoArea("Area 8 - Portfolio Monitoring", portfolio_result.overall_status, commentary["portfolio_monitoring"]),
+        CreditMemoArea("Area 8 - Portfolio Monitoring", portfolio_status, commentary["portfolio_monitoring"]),
     ]
 
     return CreditMemoResult(areas=areas)

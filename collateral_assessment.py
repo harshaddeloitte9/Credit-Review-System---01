@@ -82,15 +82,30 @@ class CollateralResult:
     rating: str
 
 
-def load_collateral_inputs(workbook_path) -> CollateralInputs:
-    ws = load_workbook(workbook_path, data_only=True)[COLLATERAL_SHEET]
+def load_collateral_inputs(workbook_path):
+    """Returns None (not a crash, not a Tata Steel fallback) when this
+    workbook has no '5-Collateral Assessment' sheet or is missing its
+    book-value/haircut cells - the caller (app.py) is expected to show
+    "Collateral data unavailable" rather than calling
+    build_collateral_assessment() at all in that case."""
+    wb = load_workbook(workbook_path, data_only=True)
+    if COLLATERAL_SHEET not in wb.sheetnames:
+        return None
+    ws = wb[COLLATERAL_SHEET]
 
     assets_raw = []
     for row in _ASSET_ROWS:
+        book_value, haircut = ws[f"B{row}"].value, ws[f"C{row}"].value
+        if book_value is None or haircut is None:
+            return None
+        try:
+            book_value, haircut = float(book_value), float(haircut)
+        except (TypeError, ValueError):
+            return None
         assets_raw.append((
             ws[f"A{row}"].value,
-            float(ws[f"B{row}"].value),
-            float(ws[f"C{row}"].value),
+            book_value,
+            haircut,
             ws[f"E{row}"].value,
             ws[f"F{row}"].value,
             ws[f"G{row}"].value,

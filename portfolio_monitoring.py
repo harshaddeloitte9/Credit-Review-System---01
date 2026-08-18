@@ -75,15 +75,33 @@ class PortfolioMonitoringResult:
     overall_status: str
 
 
-def load_portfolio_inputs(workbook_path) -> PortfolioInputs:
-    ws = load_workbook(workbook_path, data_only=True)[PORTFOLIO_MONITORING_SHEET]
-    return PortfolioInputs(
-        segment=str(ws["C7"].value),
-        total_portfolio_exposure=float(ws["C8"].value),
-        number_of_accounts=int(ws["C9"].value),
-        proposed_loan_amount=float(ws["C11"].value),
-        gross_npl=float(ws["C13"].value),
-    )
+def load_portfolio_inputs(workbook_path):
+    """Returns None (not a crash, not a Tata Steel fallback) when this
+    workbook has no '8-Portfolio Monitoring' sheet or is missing its input
+    cells - the caller (app.py) is expected to show "Portfolio data
+    unavailable" rather than calling build_portfolio_monitoring() at all
+    in that case. Portfolio Monitoring is lender-portfolio-level data with
+    no connection to any borrower's financial statements (see module
+    docstring), so there is never a borrower-financials-derived value to
+    fall back to either way."""
+    wb = load_workbook(workbook_path, data_only=True)
+    if PORTFOLIO_MONITORING_SHEET not in wb.sheetnames:
+        return None
+    ws = wb[PORTFOLIO_MONITORING_SHEET]
+    segment = ws["C7"].value
+    raw = (segment, ws["C8"].value, ws["C9"].value, ws["C11"].value, ws["C13"].value)
+    if any(v is None for v in raw):
+        return None
+    try:
+        return PortfolioInputs(
+            segment=str(segment),
+            total_portfolio_exposure=float(ws["C8"].value),
+            number_of_accounts=int(ws["C9"].value),
+            proposed_loan_amount=float(ws["C11"].value),
+            gross_npl=float(ws["C13"].value),
+        )
+    except (TypeError, ValueError):
+        return None
 
 
 def _npl_band(pct):
