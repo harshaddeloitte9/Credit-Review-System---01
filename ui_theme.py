@@ -813,13 +813,23 @@ def _base_layout(fig, height, legend=True):
     return fig
 
 
+def _safe_fmt(value_fmt, v):
+    # A metric can be legitimately unavailable (e.g. an OCR extraction
+    # that could not reliably read a source figure) rather than always
+    # populated the way the reference workbook's own static data always
+    # is. None is passed through as the bar's y-value unchanged - Plotly
+    # renders that as a genuinely absent bar, not a fabricated zero -
+    # only the printed text label needs its own safe formatting.
+    return value_fmt.format(v) if v is not None else "N/A"
+
+
 def fy_comparison_bar(categories, current_values, previous_values, current_label, previous_label,
                        value_fmt="{:,.1f}", height=320, y_tickformat=None):
     fig = go.Figure()
     fig.add_trace(go.Bar(
         name=previous_label, x=categories, y=previous_values,
         marker_color=BLUE_LIGHT,
-        text=[value_fmt.format(v) for v in previous_values],
+        text=[_safe_fmt(value_fmt, v) for v in previous_values],
         textposition="outside",
         textfont=dict(color=INK_SECONDARY, size=11),
         cliponaxis=False,
@@ -827,7 +837,7 @@ def fy_comparison_bar(categories, current_values, previous_values, current_label
     fig.add_trace(go.Bar(
         name=current_label, x=categories, y=current_values,
         marker_color=BLUE,
-        text=[value_fmt.format(v) for v in current_values],
+        text=[_safe_fmt(value_fmt, v) for v in current_values],
         textposition="outside",
         textfont=dict(color=INK_PRIMARY, size=11),
         cliponaxis=False,
@@ -842,13 +852,13 @@ def fy_comparison_bar(categories, current_values, previous_values, current_label
 def magnitude_bar(categories, values, value_fmt="{:,.2f}", height=320, sort_desc=True):
     pairs = list(zip(categories, values))
     if sort_desc:
-        pairs.sort(key=lambda p: p[1], reverse=True)
+        pairs.sort(key=lambda p: (p[1] is not None, p[1]), reverse=True)
     cats = [p[0] for p in pairs]
     vals = [p[1] for p in pairs]
     fig = go.Figure(go.Bar(
         x=vals, y=cats, orientation="h",
         marker_color=BLUE,
-        text=[value_fmt.format(v) for v in vals],
+        text=[_safe_fmt(value_fmt, v) for v in vals],
         textposition="outside",
         textfont=dict(color=INK_PRIMARY, size=11.5),
         cliponaxis=False,

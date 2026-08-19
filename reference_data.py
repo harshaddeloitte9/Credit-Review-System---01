@@ -157,6 +157,8 @@ def _cell(ws, coord):
 def _num(ws, coord):
     cell = _cell(ws, coord)
     value = cell.value
+    if value is None:
+        return None
     if isinstance(value, str) and value.strip().startswith("="):
         raise ReferenceDataError(
             f"{ws.title}!{coord} was expected to be a raw input value but "

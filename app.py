@@ -6,13 +6,13 @@ from openpyxl import load_workbook
 
 from reference_data import load_reference_bundle, ReferenceDataError
 from workbook_validation import validate_workbook
-from demo_source import build_demo_workbook, DemoSourceError, EXTRACTED_SHEET_FILE, EXTRACTED_SHEET_PATH
-from input_data_engine import compute_derived_metrics, compute_calculated_ratios, run_validation_checks
+import ocr_upload
+from input_data_engine import compute_derived_metrics, run_validation_checks
 from financial_analysis import build_financial_analysis
 from risk_scoring import build_risk_scoring
 from covenants import load_covenant_policy, build_covenants
 from collateral_assessment import load_collateral_inputs, build_collateral_assessment
-from limit_setting import load_limit_setting_policy, build_limit_setting
+from limit_setting import load_limit_setting_policy, build_limit_setting, LimitSettingResult
 from continuous_monitoring import load_monitoring_policy, build_continuous_monitoring
 from portfolio_monitoring import load_portfolio_inputs, build_portfolio_monitoring
 from credit_memo import load_credit_memo_commentary, build_credit_memo
@@ -104,6 +104,52 @@ def _cleanup_uploaded_workbook():
             pass
 
 
+PDF_SESSION_KEYS = [
+    ("pdf_name", None),
+    ("pdf_size", None),
+    ("_last_pdf_upload_id", None),
+    ("pdf_processing_error", None),
+    ("raw_ocr_path", None),
+    ("extracted_workbook_path", None),
+    ("extracted_workbook_name", None),
+    ("merged_workbook_path", None),
+    ("extraction_status_counts", None),
+    ("extraction_total_fields", None),
+]
+
+
+def _cleanup_pdf_artifacts():
+    """Removes the temp files a previous PDF upload generated (raw OCR
+    text, extracted workbook). The merged workbook is not removed here -
+    demo_source.build_demo_workbook() overwrites the same fixed path on
+    every call, matching its own existing convention, so there is
+    nothing stale left behind for it to clean up."""
+    for _key in ("raw_ocr_path", "extracted_workbook_path"):
+        _path = st.session_state.get(_key)
+        if _path and os.path.exists(_path):
+            try:
+                os.remove(_path)
+            except OSError:
+                pass
+
+
+def _reset_to_no_data():
+    """Clears every session_state key either upload path uses, back to
+    an empty "no active borrower" state - used both when the user
+    explicitly starts a new upload and when a workbook fails to load,
+    so a failed load is never silently retried forever."""
+    _cleanup_uploaded_workbook()
+    _cleanup_pdf_artifacts()
+    for _key, _default in [
+        ("source_mode", "none"),
+        ("uploaded_workbook_path", None),
+        ("uploaded_workbook_name", None),
+        ("uploaded_workbook_warnings", []),
+        ("_last_upload_id", None),
+    ] + PDF_SESSION_KEYS:
+        st.session_state[_key] = _default
+
+
 def _read_file_bytes(path):
     """Plain, uncached read. st.cache_data was tried here but its
     pickle-based cache write raised MemoryError on the ~24MB source PDF
@@ -174,18 +220,26 @@ render_sidebar_brand("CR", "Credit Review Tool", "Reference dataset workflow")
 # ============================================================
 
 for _key, _default in [
-    ("source_mode", "demo"),
+    ("source_mode", "none"),
     ("uploaded_workbook_path", None),
     ("uploaded_workbook_name", None),
     ("uploaded_workbook_warnings", []),
     ("_last_upload_id", None),
     ("uploader_key_version", 0),
-]:
+] + PDF_SESSION_KEYS:
     if _key not in st.session_state:
         st.session_state[_key] = _default
 
 _using_upload = st.session_state["source_mode"] == "uploaded" and st.session_state["uploaded_workbook_path"]
-source_label = f"Uploaded: {st.session_state['uploaded_workbook_name']}" if _using_upload else "Demo Extracted Sheet"
+_using_pdf = st.session_state["source_mode"] == "pdf" and st.session_state["merged_workbook_path"]
+_has_active_data = bool(_using_upload or _using_pdf)
+
+if _using_upload:
+    source_label = f"Uploaded workbook: {st.session_state['uploaded_workbook_name']}"
+elif _using_pdf:
+    source_label = f"Uploaded PDF: {st.session_state['pdf_name']}"
+else:
+    source_label = "No financial statement uploaded"
 
 
 # ============================================================
@@ -195,56 +249,68 @@ source_label = f"Uploaded: {st.session_state['uploaded_workbook_name']}" if _usi
 # recomputing them)
 # ============================================================
 #
-# Demo mode: '1-Input Data' comes from Demo Extracted Sheet.xlsx (the
-# current source of truth - see demo_source.py), merged into a copy of
-# the policy workbook (Credit Review Automation Example.xlsx) for the
-# '2-Financial Analysis' through '9 - Credit Memo' cells that only that
-# workbook carries. Uploaded mode is unchanged from the existing
-# dynamic-upload feature: the user's own complete workbook, used as-is.
+# No demo/default dataset is loaded automatically - d/bundle/fa/risk
+# stay None until a PDF has been uploaded and processed (or, in
+# Advanced mode, a complete replacement workbook). Every page except
+# Data Upload shows a "no data" state instead of rendering while that
+# is true (see the _has_active_data guard just above the page-routing
+# chain below). PDF mode: '1-Input Data' comes from OCR-extracting the
+# just-uploaded PDF (see ocr_upload.py), merged into a copy of the
+# policy workbook (Credit Review Automation Example.xlsx) for the
+# '2-Financial Analysis' through '9 - Credit Memo' policy/threshold
+# cells that only that workbook carries - never for borrower figures.
+# Uploaded-workbook mode (Advanced, hidden by default) is unchanged:
+# the user's own complete workbook, used as-is.
 
-if _using_upload:
-    active_workbook_path = st.session_state["uploaded_workbook_path"]
-else:
+bundle = None
+d = None
+fa = None
+risk = None
+
+if _has_active_data:
+    active_workbook_path = (
+        st.session_state["uploaded_workbook_path"] if _using_upload
+        else st.session_state["merged_workbook_path"]
+    )
+
     try:
-        active_workbook_path = build_demo_workbook()
-    except DemoSourceError as exc:
-        st.error("Could not build the current demo dataset.")
+        bundle = load_reference_bundle(path=active_workbook_path)
+        d = bundle.input_data
+        fa = build_financial_analysis(bundle)
+        risk = build_risk_scoring(bundle)
+    except ReferenceDataError as exc:
+        st.error(f"Could not load '{source_label}'.")
         st.code(str(exc))
-        st.stop()
+        st.info("Upload a financial statement on the Data Upload page to continue.")
+        _reset_to_no_data()
+        _has_active_data = False
+        bundle = None
 
-try:
-    bundle = load_reference_bundle(path=active_workbook_path)
-except ReferenceDataError as exc:
-    st.error(f"Could not load '{source_label}'.")
-    st.code(str(exc))
-    if _using_upload:
-        st.info("Falling back to the demo dataset - use the sidebar to try another upload.")
-        _cleanup_uploaded_workbook()
-        for _key, _default in [
-            ("source_mode", "demo"), ("uploaded_workbook_path", None),
-            ("uploaded_workbook_name", None), ("uploaded_workbook_warnings", []),
-            ("_last_upload_id", None),
-        ]:
-            st.session_state[_key] = _default
-        st.rerun()
-    st.stop()
+if d is not None:
+    crumb = (
+        f"{d.company_name} · {d.statement_scope} · FY{d.fy_current_year} · {d.currency_unit.title()} "
+        f"· Source: {source_label}"
+    )
+else:
+    crumb = "No financial statement uploaded yet"
 
-d = bundle.input_data
-fa = build_financial_analysis(bundle)
-risk = build_risk_scoring(bundle)
-
-crumb = (
-    f"{d.company_name} · {d.statement_scope} · FY{d.fy_current_year} · {d.currency_unit.title()} "
-    f"· Source: {source_label}"
-)
-
-render_sidebar_status(
-    d.company_name,
-    f"{d.statement_scope} · FY{d.fy_current_year}",
-    fa.overall_status,
-    "good" if fa.overall_status == "Approve" else "critical",
-    f"{risk.total_weighted_score:.2f} / 5.00",
-)
+if fa is not None and risk is not None:
+    render_sidebar_status(
+        d.company_name,
+        f"{d.statement_scope} · FY{d.fy_current_year}",
+        fa.overall_status,
+        "good" if fa.overall_status == "Approve" else "critical",
+        f"{risk.total_weighted_score:.2f} / 5.00",
+    )
+else:
+    st.sidebar.markdown(
+        '<div class="cr-sidebar-status">'
+        '<div class="cr-sidebar-status-eyebrow">Active Borrower</div>'
+        '<div class="cr-sidebar-status-name">No data uploaded</div>'
+        '<div class="cr-sidebar-status-meta">Upload a financial statement PDF to begin</div>'
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
 selected_area = st.sidebar.radio("Go to", AREAS, label_visibility="collapsed")
 
@@ -255,8 +321,8 @@ st.sidebar.caption(
 )
 st.sidebar.caption(
     "9 credit-analysis modules are implemented, each validated against the reference workbook. "
-    "PDF/OCR extraction is not used by this workflow - that pipeline is preserved as-is in "
-    "`ocr_pipeline.py` for future re-integration; nothing on this page calls it."
+    "Borrower data is extracted live from an uploaded PDF via OCR (`ocr_pipeline.py` / "
+    "`ocr_upload.py`); policy/threshold sheets continue to come from the reference workbook."
 )
 
 render_topbar()
@@ -272,8 +338,8 @@ _PCT_LEVEL_KEYS = {"ebitda_margin_growth", "ebitda_margin_pct", "net_profit_marg
 _DAYS_KEYS = {"debtors_days", "inventory_days"}
 _GROWTH_THRESHOLD_KEYS = {"revenue", "ebitda_margin_growth", "net_profit", "total_assets", "net_worth", "operating_cash_flow"}
 
-FY_CURRENT_SHORT = f"FY{d.fy_current_year}"
-FY_PREVIOUS_SHORT = f"FY{d.fy_previous_year}"
+FY_CURRENT_SHORT = f"FY{d.fy_current_year}" if d is not None else "FY-current"
+FY_PREVIOUS_SHORT = f"FY{d.fy_previous_year}" if d is not None else "FY-previous"
 
 
 def fmt_money(value):
@@ -385,159 +451,210 @@ def year_figure_html_table(pairs, current_label, previous_label):
 # 1. DATA UPLOAD
 # ============================================================
 #
-# Current stage: shows the source PDF and the already-extracted data as
-# preloaded for this credit review - real filename/type/size only, no
-# invented metadata (no upload date, user name, OCR accuracy, etc). There
-# is no live PDF uploader and no OCR/LLMWhisperer call anywhere on this
-# page (ocr_pipeline.py is not imported by app.py at all). The actual
-# current data source is Demo Extracted Sheet.xlsx, loaded via
-# demo_source.build_demo_workbook() above, unrelated to this page's
-# rendering - this page is a status/download view onto files already on
-# disk, not part of the calculation pipeline itself.
-#
-# The one working upload control on this page (the "Advanced" expander
-# near the bottom) is the existing dynamic-upload feature, relocated here
-# from the sidebar per the current requirements - its logic is otherwise
-# byte-for-byte the same as before, including the st.rerun() calls it
-# needs so the state resolved at the top of this script (which every page
-# depends on) picks up a change immediately.
+# Real PDF upload flow: uploaded PDF -> ocr_upload.process_uploaded_pdf()
+# (LLMWhisperer OCR -> ocr_pipeline.extract_financial_values() ->
+# ocr_pipeline.populate_workbook(), a fresh copy of
+# Credit_Review_Tool_Input_Data_Template.xlsx every time) -> merged with
+# the policy workbook (Credit Review Automation Example.xlsx, for
+# policy/threshold sheets only - never a borrower-data source) ->
+# activated as the dataset every other page reads. No demo/default
+# dataset is loaded automatically; until a PDF is uploaded here, every
+# other page shows a "no data" state (see the _has_active_data guard
+# just below the page-routing chain).
 
 if selected_area == AREAS[0]:
 
     render_page_header(
         "Data Upload", crumb,
-        "Source document and extracted data status for the current credit review.",
+        "Upload a financial statement PDF to extract borrower data via OCR and activate it "
+        "for this credit review.",
     )
 
-    pdf_filename = "TATA STEEL FS_31March2026 (1).pdf"
-    pdf_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), pdf_filename)
+    render_section("Upload Financial Statement", "PDF")
 
-    # ---- 1. Data Source (source document) ---------------------------
-    render_section("Data Source", "Financial Statement")
-    if os.path.exists(pdf_path):
-        pdf_size_mb = os.path.getsize(pdf_path) / (1024 * 1024)
-        doc_col, dl_col = st.columns([4, 1])
-        with doc_col:
-            st.markdown(
-                '<div class="cr-card">'
-                '<div style="display:flex;align-items:center;gap:0.9rem;">'
-                '<div class="cr-doc-icon">PDF</div>'
-                '<div>'
-                f'<div class="cr-kpi-value" style="font-size:1rem;">{pdf_filename}</div>'
-                f'<div class="cr-kpi-sub">PDF · {pdf_size_mb:.1f} MB · {d.company_name} · FY{d.fy_current_year}</div>'
-                f'<div style="margin-top:0.45rem;">{badge_html("✓ Loaded", "good")}</div>'
-                "</div>"
-                "</div>"
-                "</div>",
-                unsafe_allow_html=True,
-            )
-        with dl_col:
-            st.markdown("<div style='margin-top:0.9rem;'></div>", unsafe_allow_html=True)
-            st.download_button(
-                "Download PDF",
-                data=_read_file_bytes(pdf_path),
-                file_name=pdf_filename,
-                mime="application/pdf",
-                width="stretch",
-            )
-        st.caption(
-            "This document is preloaded automatically for the current credit review - no "
-            "manual upload is required."
+    _uploaded_pdf = st.file_uploader(
+        "Upload a financial statement (PDF)",
+        type=["pdf"],
+        key=f"pdf_uploader_{st.session_state['uploader_key_version']}",
+    )
+
+    if _uploaded_pdf is not None:
+        _pdf_upload_id = getattr(_uploaded_pdf, "file_id", None) or f"{_uploaded_pdf.name}:{_uploaded_pdf.size}"
+        if _pdf_upload_id != st.session_state["_last_pdf_upload_id"]:
+            st.session_state["_last_pdf_upload_id"] = _pdf_upload_id
+            _cleanup_pdf_artifacts()
+            st.session_state["pdf_processing_error"] = None
+
+            os.makedirs(ocr_upload.UPLOAD_WORK_DIR, exist_ok=True)
+            _safe_id = _pdf_upload_id.replace(":", "_").replace("/", "_").replace("\\", "_")
+            _pdf_temp_path = os.path.join(ocr_upload.UPLOAD_WORK_DIR, f"upload_{_safe_id}.pdf")
+            with open(_pdf_temp_path, "wb") as f:
+                f.write(_uploaded_pdf.getbuffer())
+
+            with st.status("Processing uploaded financial statement...", expanded=True) as _status:
+                st.write(f"Running OCR on **{_uploaded_pdf.name}** - this can take a few minutes for a large document.")
+                try:
+                    _result = ocr_upload.process_uploaded_pdf(_pdf_temp_path, _uploaded_pdf.name)
+                    st.write("✓ OCR completed")
+                    st.write("✓ Financial data extracted")
+                    st.write("✓ Input workbook generated")
+                    st.session_state["pdf_name"] = _uploaded_pdf.name
+                    st.session_state["pdf_size"] = _uploaded_pdf.size
+                    st.session_state["raw_ocr_path"] = _result["raw_ocr_path"]
+                    st.session_state["extracted_workbook_path"] = _result["extracted_workbook_path"]
+                    st.session_state["extracted_workbook_name"] = _result["extracted_workbook_name"]
+                    st.session_state["merged_workbook_path"] = _result["merged_workbook_path"]
+                    st.session_state["extraction_status_counts"] = _result["status_counts"]
+                    st.session_state["extraction_total_fields"] = _result["total_fields"]
+                    st.session_state["source_mode"] = "pdf"
+                    _status.update(label="Processing complete", state="complete")
+                except Exception as exc:
+                    st.session_state["pdf_processing_error"] = str(exc)
+                    _status.update(label="Processing failed", state="error")
+            st.rerun()
+
+    if st.session_state.get("pdf_processing_error"):
+        st.error("Could not process the uploaded PDF.")
+        st.code(st.session_state["pdf_processing_error"])
+
+    if not _using_pdf:
+        if not st.session_state.get("pdf_processing_error"):
+            st.info("No financial statement uploaded yet. Upload a PDF above to begin.")
+
+    else:
+        # ---- Source Document -----------------------------------------
+        render_section("Source Document")
+        _pdf_size_mb = (st.session_state["pdf_size"] or 0) / (1024 * 1024)
+        st.markdown(
+            '<div class="cr-card">'
+            '<div style="display:flex;align-items:center;gap:0.9rem;">'
+            '<div class="cr-doc-icon">PDF</div>'
+            '<div>'
+            f'<div class="cr-kpi-value" style="font-size:1rem;">{st.session_state["pdf_name"]}</div>'
+            f'<div class="cr-kpi-sub">PDF · {_pdf_size_mb:.1f} MB</div>'
+            f'<div style="margin-top:0.45rem;">{badge_html("✓ Uploaded", "good")}</div>'
+            "</div>"
+            "</div>"
+            "</div>",
+            unsafe_allow_html=True,
         )
-    else:
-        st.warning(f"Expected source document '{pdf_filename}' was not found in the application folder.")
 
-    # ---- 2. Extraction status flow -----------------------------------
-    render_section("Extraction Status")
-    render_flow_steps([
-        ("Source Document", pdf_filename, "good"),
-        ("Extraction", "Pre-extracted for demo", "neutral"),
-        ("Extracted Financial Data", EXTRACTED_SHEET_FILE, "good"),
-    ])
-    st.caption(
-        "OCR is not run live in this build - the steps above represent the intended pipeline. "
-        "For the current demo, the extraction step is a pre-extracted, already-validated "
-        "dataset rather than a live OCR result."
-    )
-
-    # ---- 3. Extracted Financial Data ----------------------------------
-    render_section("Extracted Financial Data")
-    if os.path.exists(EXTRACTED_SHEET_PATH):
-        extracted_size_kb = os.path.getsize(EXTRACTED_SHEET_PATH) / 1024
-        doc_col, dl_col = st.columns([4, 1])
-        with doc_col:
-            st.markdown(
-                '<div class="cr-card">'
-                '<div style="display:flex;align-items:center;gap:0.9rem;">'
-                '<div class="cr-doc-icon">XLS</div>'
-                '<div>'
-                f'<div class="cr-kpi-value" style="font-size:1rem;">{EXTRACTED_SHEET_FILE}</div>'
-                f'<div class="cr-kpi-sub">Excel · {extracted_size_kb:.0f} KB</div>'
-                f'<div style="margin-top:0.45rem;">{badge_html("✓ Ready", "good")}</div>'
-                "</div>"
-                "</div>"
-                "</div>",
-                unsafe_allow_html=True,
-            )
-        with dl_col:
-            st.markdown("<div style='margin-top:0.9rem;'></div>", unsafe_allow_html=True)
-            st.download_button(
-                "Download Excel",
-                data=_read_file_bytes(EXTRACTED_SHEET_PATH),
-                file_name=EXTRACTED_SHEET_FILE,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                width="stretch",
-            )
-        st.caption("Pre-extracted financial data corresponding to the current demo source document.")
-    else:
-        st.warning(f"Expected extracted data source '{EXTRACTED_SHEET_FILE}' was not found in the application folder.")
-
-    # ---- 4. Active Data Source ------------------------------------------
-    render_section("Active Data Source")
-    _active_dataset_label = st.session_state["uploaded_workbook_name"] if _using_upload else EXTRACTED_SHEET_FILE
-    st.markdown(
-        '<div class="cr-card">'
-        '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1rem;">'
-        f'<div><div class="cr-kpi-label">Borrower</div><div class="cr-kpi-value" style="font-size:1rem;">{d.company_name}</div></div>'
-        f'<div><div class="cr-kpi-label">Dataset</div><div class="cr-kpi-value" style="font-size:1rem;">{_active_dataset_label}</div></div>'
-        f'<div><div class="cr-kpi-label">Source</div><div class="cr-kpi-value" style="font-size:1rem;">Tata Steel financial statement</div></div>'
-        f'<div><div class="cr-kpi-label">Status</div><div style="margin-top:0.25rem;">{badge_html("● Active", "good")}</div></div>'
-        "</div>"
-        "</div>",
-        unsafe_allow_html=True,
-    )
-    if _advanced_mode_enabled():
+        # ---- Document Extraction ---------------------------------------
+        render_section("Document Extraction")
+        render_flow_steps([
+            ("Source Document", st.session_state["pdf_name"], "good"),
+            ("OCR Extraction", "Completed", "good"),
+            ("Extracted Financial Data", st.session_state["extracted_workbook_name"], "good"),
+        ])
+        _counts = st.session_state["extraction_status_counts"] or {}
+        _total = st.session_state["extraction_total_fields"] or 0
         st.caption(
-            "All downstream modules (Input & Validation through Credit Memo) read from this "
-            "dataset - see 'Advanced' below for how to point them at a different workbook."
+            f"Of {_total} mapped fields: {_counts.get('CORRECT', 0)} extracted directly, "
+            f"{_counts.get('NORMALIZED_FROM_OCR', 0)} normalized from OCR formatting defects, "
+            f"{_counts.get('NOT_FOUND_IN_OCR', 0)} not present in the source document, "
+            f"{_counts.get('AMBIGUOUS', 0)} withheld as ambiguous (see Input & Validation)."
         )
-    else:
-        st.caption("All downstream modules (Input & Validation through Credit Memo) read from this dataset.")
 
-    # ---- 5. Future Upload (PDF - not yet enabled) ------------------------
-    render_section("Future Upload")
-    st.markdown(
-        '<div class="cr-card" style="text-align:center;padding:1.9rem 1.5rem;'
-        'border-style:dashed;opacity:0.8;">'
-        '<div style="font-weight:700;color:#52514e;">⬆ Upload Financial Statement</div>'
-        '<div style="font-size:0.85rem;color:#898781;margin-top:0.4rem;">'
-        "PDF upload will be enabled in a future release."
-        "</div>"
-        "</div>",
-        unsafe_allow_html=True,
-    )
+        # ---- Extracted Financial Data -----------------------------------
+        render_section("Extracted Financial Data")
+        _extracted_path = st.session_state["extracted_workbook_path"]
+        if _extracted_path and os.path.exists(_extracted_path):
+            _extracted_size_kb = os.path.getsize(_extracted_path) / 1024
+            doc_col, dl_col = st.columns([4, 1])
+            with doc_col:
+                st.markdown(
+                    '<div class="cr-card">'
+                    '<div style="display:flex;align-items:center;gap:0.9rem;">'
+                    '<div class="cr-doc-icon">XLS</div>'
+                    '<div>'
+                    f'<div class="cr-kpi-value" style="font-size:1rem;">{st.session_state["extracted_workbook_name"]}</div>'
+                    f'<div class="cr-kpi-sub">Excel · {_extracted_size_kb:.0f} KB · generated from '
+                    f'Credit_Review_Tool_Input_Data_Template.xlsx</div>'
+                    f'<div style="margin-top:0.45rem;">{badge_html("✓ Ready", "good")}</div>'
+                    "</div>"
+                    "</div>"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+            with dl_col:
+                st.markdown("<div style='margin-top:0.9rem;'></div>", unsafe_allow_html=True)
+                st.download_button(
+                    "Download Excel",
+                    data=_read_file_bytes(_extracted_path),
+                    file_name=st.session_state["extracted_workbook_name"],
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    width="stretch",
+                )
+            st.caption("The '1-Input Data' sheet generated from this upload's own OCR text.")
 
-    # ---- 6. Advanced: the existing dynamic-upload feature ------------------
+        # ---- Raw OCR Output ---------------------------------------------
+        render_section("Raw OCR Output")
+        _raw_ocr_path = st.session_state["raw_ocr_path"]
+        if _raw_ocr_path and os.path.exists(_raw_ocr_path):
+            _raw_ocr_name = os.path.basename(_raw_ocr_path)
+            _raw_ocr_size_kb = os.path.getsize(_raw_ocr_path) / 1024
+            doc_col, dl_col = st.columns([4, 1])
+            with doc_col:
+                st.markdown(
+                    '<div class="cr-card">'
+                    '<div style="display:flex;align-items:center;gap:0.9rem;">'
+                    '<div class="cr-doc-icon">TXT</div>'
+                    '<div>'
+                    f'<div class="cr-kpi-value" style="font-size:1rem;">{_raw_ocr_name}</div>'
+                    f'<div class="cr-kpi-sub">Text · {_raw_ocr_size_kb:.0f} KB</div>'
+                    f'<div style="margin-top:0.45rem;">{badge_html("✓ Ready", "good")}</div>'
+                    "</div>"
+                    "</div>"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+            with dl_col:
+                st.markdown("<div style='margin-top:0.9rem;'></div>", unsafe_allow_html=True)
+                st.download_button(
+                    "Download Raw OCR",
+                    data=_read_file_bytes(_raw_ocr_path),
+                    file_name=_raw_ocr_name,
+                    mime="text/plain",
+                    width="stretch",
+                )
+            st.caption("The exact LLMWhisperer result_text for this upload, unmodified.")
+
+        # ---- Active Data Source -------------------------------------------
+        render_section("Active Data Source")
+        _borrower_label = d.company_name if d is not None else "Unknown"
+        st.markdown(
+            '<div class="cr-card">'
+            '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1rem;">'
+            f'<div><div class="cr-kpi-label">Borrower</div><div class="cr-kpi-value" style="font-size:1rem;">{_borrower_label}</div></div>'
+            f'<div><div class="cr-kpi-label">Uploaded document</div><div class="cr-kpi-value" style="font-size:1rem;">{st.session_state["pdf_name"]}</div></div>'
+            f'<div><div class="cr-kpi-label">Status</div><div style="margin-top:0.25rem;">{badge_html("● Active", "good")}</div></div>'
+            "</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            "Company name is not automatically detected from the source document in this build - "
+            "the uploaded filename above is the reliable identifier for this borrower. All "
+            "downstream modules (Input & Validation through Credit Memo) read from this dataset."
+        )
+
+        if st.button("↺ Upload a different financial statement"):
+            _reset_to_no_data()
+            st.session_state["uploader_key_version"] += 1
+            st.rerun()
+
+    # ---- Advanced: the existing dynamic-upload feature ------------------
     # Not deleted - only hidden from the default consultant-facing view.
     # See _advanced_mode_enabled() above for the two (non-UI) ways to
-    # reveal it. Everything inside this branch is unchanged from before.
+    # reveal it. Bypasses OCR entirely: a complete replacement workbook
+    # supplied as-is, kept for testing/QA - never the source for a real
+    # PDF upload, which always goes through the flow above instead.
     if _advanced_mode_enabled():
         with st.expander("Advanced: load a different Credit Review workbook (for testing)"):
             st.caption(
-                "This uploads a complete replacement workbook (all sheets, not just the PDF's "
-                "extracted data) and switches every module's data source to it - separate from "
-                "the PDF placeholder above, which is not yet functional. The demo source "
-                f"({EXTRACTED_SHEET_FILE}) is unaffected unless you use this control."
+                "This uploads a complete replacement workbook (all sheets, not just borrower "
+                "data) and switches every module's data source to it directly, bypassing OCR "
+                "entirely - separate from the PDF upload above."
             )
 
             # Versioned key (workbook_uploader_0, _1, ...) rather than fixed:
@@ -581,18 +698,32 @@ if selected_area == AREAS[0]:
                         "Some modules are unavailable for this workbook:\n\n"
                         + "\n".join(f"- {w}" for w in st.session_state["uploaded_workbook_warnings"])
                     )
-                if st.button(f"↺ Reset to demo dataset ({EXTRACTED_SHEET_FILE})"):
-                    _cleanup_uploaded_workbook()
-                    for _key, _default in [
-                        ("source_mode", "demo"), ("uploaded_workbook_path", None),
-                        ("uploaded_workbook_name", None), ("uploaded_workbook_warnings", []),
-                        ("_last_upload_id", None),
-                    ]:
-                        st.session_state[_key] = _default
+                if st.button("↺ Clear this workbook"):
+                    _reset_to_no_data()
                     st.session_state["uploader_key_version"] += 1
                     st.rerun()
             else:
-                st.caption(f"Currently analyzing the demo dataset (**{EXTRACTED_SHEET_FILE}**).")
+                st.caption("No replacement workbook loaded.")
+
+
+# ============================================================
+# NO ACTIVE DATA - every page below this point (Input & Validation
+# through Credit Memo) requires an active borrower dataset. Rather
+# than each page guarding itself, this single branch intercepts all
+# of them at once whenever nothing has been uploaded yet (or a
+# previous upload failed to load) - showing the same message a
+# consultant would see is a stronger signal than ten different pages
+# quietly rendering nothing.
+# ============================================================
+
+elif not _has_active_data:
+
+    _page_title = selected_area.split(". ", 1)[1] if ". " in selected_area else selected_area
+    render_page_header(_page_title, crumb, "No financial statement uploaded yet.")
+    st.info(
+        "No data uploaded. Go to **Data Upload** and upload a financial statement PDF to "
+        "activate this page."
+    )
 
 
 # ============================================================
@@ -608,7 +739,6 @@ elif selected_area == AREAS[1]:
     )
 
     m = compute_derived_metrics(d)
-    c_ratios = compute_calculated_ratios(d, m)
     checks = run_validation_checks(d, m)
     checks_by_cell = {c.cell: c for c in checks}
 
@@ -726,45 +856,6 @@ elif selected_area == AREAS[1]:
         rows = [{"Cell": c.cell, "Check": c.label, "Result": c.result} for c in checks]
         render_html_table(rows, columns=["Cell", "Check", "Result"], badge_col="Result")
 
-    render_section(
-        "Reported vs Calculated — reconciliation",
-        "Where '1-Input Data' defines both a disclosed (Reported) figure and an independently "
-        "derived (Calculated) formula for the same ratio, both are shown here. Four of these "
-        "eight have no reconciliation check in the reference workbook itself and are labelled "
-        "accordingly rather than judged - see the Financial Analysis notes for the DSCR/ISCR/"
-        "Current Ratio/Net Worth gap this surfaces.",
-    )
-    recon_rows = []
-    recon_defs = [
-        ("DSCR", d.reported_dscr.current, c_ratios.dscr.current, None),
-        ("ISCR", d.reported_iscr.current, c_ratios.iscr.current, None),
-        ("Current Ratio", d.reported_current_ratio.current, c_ratios.current_ratio.current, None),
-        ("Debt-Equity", d.reported_debt_equity.current, c_ratios.debt_equity.current, "B73"),
-        ("Debt/Assets", d.reported_debt_assets.current, c_ratios.debt_assets.current, "B72"),
-        ("EBITDA Margin", d.reported_ebitda_margin.current * 100, c_ratios.ebitda_margin.current * 100, "B69"),
-        ("Net Profit Margin", d.reported_net_profit_margin.current * 100, c_ratios.net_profit_margin.current * 100, "B71"),
-        ("Net Worth", d.reported_net_worth.current, c_ratios.net_worth.current, None),
-    ]
-    for label, reported, calculated, check_cell in recon_defs:
-        if check_cell:
-            result_text = checks_by_cell[check_cell].result
-        else:
-            result_text = "No reference check"
-        recon_rows.append({
-            "Metric": label,
-            "Reported": f"{reported:,.4f}",
-            "Calculated": f"{calculated:,.4f}",
-            "Difference": f"{reported - calculated:,.4f}",
-            "Reference check": result_text,
-        })
-    render_html_table(
-        recon_rows,
-        columns=["Metric", "Reported", "Calculated", "Difference", "Reference check"],
-        badge_col="Reference check",
-        numeric_cols=["Reported", "Calculated", "Difference"],
-    )
-
-
 
 # ============================================================
 # 3. FINANCIAL ANALYSIS
@@ -802,7 +893,8 @@ elif selected_area == AREAS[2]:
 
     r = rows_by_key["ebitda_margin_growth"]
     delta, kind = delta_text_kind(r.current, r.previous, as_points=True)
-    ebitda_margin_card = kpi_card_html("EBITDA Margin", f"{r.current:.2f}%", delta, kind, "EBITDA / Revenue")
+    ebitda_margin_value = f"{r.current:.2f}%" if r.current is not None else "Not available"
+    ebitda_margin_card = kpi_card_html("EBITDA Margin", ebitda_margin_value, delta, kind, "EBITDA / Revenue")
 
     r = rows_by_key["net_profit"]
     delta, kind = delta_text_kind(r.current, r.previous)
@@ -810,7 +902,8 @@ elif selected_area == AREAS[2]:
 
     r = rows_by_key["net_profit_margin_pct"]
     delta, kind = delta_text_kind(r.current, r.previous, as_points=True)
-    net_profit_margin_card = kpi_card_html("Net Profit Margin", f"{r.current:.2f}%", delta, kind, "Net Profit / Revenue")
+    net_profit_margin_value = f"{r.current:.2f}%" if r.current is not None else "Not available"
+    net_profit_margin_card = kpi_card_html("Net Profit Margin", net_profit_margin_value, delta, kind, "Net Profit / Revenue")
 
     r = rows_by_key["total_assets"]
     delta, kind = delta_text_kind(r.current, r.previous)
@@ -880,11 +973,11 @@ elif selected_area == AREAS[2]:
         st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
         st.caption(
             "Total Debt vs Total Equity (balance-sheet basis). Differs from the "
-            "disclosure-basis Net Worth card above - see the Input & Validation reconciliation."
+            "disclosure-basis Net Worth card above, which is drawn from the reported figures."
         )
 
     # ---- 4. Liquidity & Leverage ----------------------------------
-    render_section("Liquidity & Leverage", "Reported Ratios basis (see Input & Validation for the reconciliation to calculated values)")
+    render_section("Liquidity & Leverage", "Reported Ratios basis")
     col1, col2 = st.columns(2)
     with col1:
         chart_caption("Coverage ratios")
@@ -909,7 +1002,7 @@ elif selected_area == AREAS[2]:
                         ("debt_equity", "Debt/Equity"), ("debt_assets", "Debt/Assets")]:
         rr = rows_by_key[key]
         ratio_cards.append(kpi_card_html(
-            label, f"{rr.current:.2f}x",
+            label, f"{rr.current:.2f}x" if rr.current is not None else "Not available",
             sublabel=badge_html(rr.status, status_kind(rr.status)),
         ))
     render_kpi_row(ratio_cards, columns_per_row=5)
@@ -941,40 +1034,63 @@ elif selected_area == AREAS[2]:
     r_dscr = rows_by_key["dscr"]
     r_ocf = rows_by_key["operating_cash_flow"]
 
-    health_items = [
-        (
+    # Each bullet needs both years of its own metric to be available -
+    # narrated only when that is true, matching the same "not available"
+    # convention used everywhere else rather than crashing on a None a
+    # genuine OCR extraction can legitimately produce (e.g. EBITDA margin,
+    # which depends on Interest Income - not always separately reported).
+    health_items = []
+
+    if r_rev.current is not None and r_rev.previous is not None:
+        health_items.append((
             f"Revenue {_direction(r_rev.current, r_rev.previous)} "
             f"{abs(r_rev.pct_change) * 100:.1f}% YoY to ₹{r_rev.current:,.0f} cr in {d.fy_current_label}.",
             "good" if r_rev.current >= r_rev.previous else "warning",
-        ),
-        (
+        ))
+
+    if r_em.current is not None and r_em.previous is not None:
+        health_items.append((
             f"EBITDA margin {_direction(r_em.current, r_em.previous, 'improved', 'declined')} from "
             f"{r_em.previous:.2f}% to {r_em.current:.2f}%.",
             "good" if r_em.current >= r_em.previous else "warning",
-        ),
-        (
+        ))
+    else:
+        health_items.append((
+            "EBITDA margin change is not available - requires Interest Income, which this "
+            "document does not separately report in the P&L.",
+            "warning",
+        ))
+
+    if r_td.current is not None and r_td.previous is not None:
+        health_items.append((
             f"Total debt {_direction(r_td.current, r_td.previous, 'increased', 'decreased')} "
             f"{abs(r_td.pct_change) * 100:.1f}% YoY to ₹{r_td.current:,.0f} cr.",
             "good" if r_td.current <= r_td.previous else "warning",
-        ),
-        (
+        ))
+
+    if r_cr.current is not None and r_cr.threshold is not None:
+        health_items.append((
             f"Current ratio stands at {r_cr.current:.2f}x, "
             f"{'meeting' if r_cr.status == 'Pass' else 'below'} the {r_cr.threshold:.2f}x policy "
             f"minimum - a {'comfortable' if r_cr.current >= 1 else 'constrained'} short-term liquidity position.",
             "good" if r_cr.status == "Pass" else "critical",
-        ),
-        (
+        ))
+
+    if r_dscr.current is not None and r_dscr.threshold is not None:
+        health_items.append((
             f"DSCR of {r_dscr.current:.2f}x is {'above' if r_dscr.status == 'Pass' else 'below'} the "
             f"{r_dscr.threshold:.2f}x policy minimum, indicating "
             f"{'adequate' if r_dscr.status == 'Pass' else 'constrained'} debt-servicing capacity on a reported basis.",
             "good" if r_dscr.status == "Pass" else "critical",
-        ),
-        (
+        ))
+
+    if r_ocf.current is not None and r_ocf.previous is not None:
+        health_items.append((
             f"Operating cash flow {_direction(r_ocf.current, r_ocf.previous)} "
             f"{abs(r_ocf.pct_change) * 100:.1f}% YoY to ₹{r_ocf.current:,.0f} cr.",
             "good" if r_ocf.current >= r_ocf.previous else "warning",
-        ),
-    ]
+        ))
+
     render_health_summary(health_items)
 
     # ---- Detail tables & notes --------------------------------------
@@ -1298,81 +1414,97 @@ elif selected_area == AREAS[6]:
     )
 
     limit_policy = load_limit_setting_policy(bundle.workbook_path)
-    limit_result = build_limit_setting(limit_policy, fa.derived.ebit.current, d.reported_dscr.current)
 
-    conclusion_text = limit_result.conclusion if isinstance(limit_result.conclusion, str) else "FALSE (uncapped case not defined by the reference workbook)"
-    conclusion_kind = "good" if limit_result.conclusion == "PASS" else "warning"
-    st.markdown(
-        badge_html(conclusion_text, conclusion_kind)
-        + f'&nbsp;&nbsp;<span style="color:{INK_MUTED};font-size:0.85rem;">'
-          f'Recommended limit ₹{limit_result.recommended_limit:,.0f} cr.</span>',
-        unsafe_allow_html=True,
-    )
-    st.markdown("<br>", unsafe_allow_html=True)
+    # build_limit_setting() (frozen) divides by both EBIT and reported
+    # DSCR with no None-guard - correct, since the reference workbook it
+    # replicates never has a missing input. A genuine OCR extraction can:
+    # EBIT is derived from Interest Income (see input_data_engine.py),
+    # which this document may not separately report. Checked here,
+    # before the call, rather than inside the frozen module - this
+    # entire page's math is one interconnected chain with no meaningful
+    # partial result once EBIT is unavailable.
+    if fa.derived.ebit.current is None or d.reported_dscr.current is None:
+        st.info(
+            "Limit Setting is not available for this document: it requires EBIT (derived from "
+            "Interest Income, which this document does not separately report in the P&L) and "
+            "the reported DSCR."
+        )
+    else:
+        limit_result = build_limit_setting(limit_policy, fa.derived.ebit.current, d.reported_dscr.current)
 
-    render_section("Proposed Facility", "Deal parameters - policy/analyst inputs read from the reference workbook.")
-    render_kpi_row([
-        kpi_card_html("Requested Amount", fmt_money_cr(limit_policy.requested_amount)),
-        kpi_card_html("Interest Rate", f"{limit_policy.interest_rate:.1%} p.a."),
-        kpi_card_html("Tenor", f"{limit_policy.tenor_years} years"),
-        kpi_card_html("Annual Instalment", fmt_money_cr(limit_result.annual_instalment), sublabel="Annuity: PMT(rate, tenor, amount)"),
-    ], columns_per_row=4)
+        conclusion_text = limit_result.conclusion if isinstance(limit_result.conclusion, str) else "FALSE (uncapped case not defined by the reference workbook)"
+        conclusion_kind = "good" if limit_result.conclusion == "PASS" else "warning"
+        st.markdown(
+            badge_html(conclusion_text, conclusion_kind)
+            + f'&nbsp;&nbsp;<span style="color:{INK_MUTED};font-size:0.85rem;">'
+              f'Recommended limit ₹{limit_result.recommended_limit:,.0f} cr.</span>',
+            unsafe_allow_html=True,
+        )
+        st.markdown("<br>", unsafe_allow_html=True)
 
-    render_section("Amortization Schedule")
-    schedule_rows = [
-        {
-            "Year": y.year,
-            "Opening Balance": fmt_money_cr(y.opening_balance),
-            "Interest": fmt_money_cr(y.interest),
-            "Principal": fmt_money_cr(y.principal),
-            "Closing Balance": fmt_money_cr(y.closing_balance),
-        }
-        for y in limit_result.schedule
-    ]
-    render_html_table(
-        schedule_rows,
-        columns=["Year", "Opening Balance", "Interest", "Principal", "Closing Balance"],
-        numeric_cols=["Year", "Opening Balance", "Interest", "Principal", "Closing Balance"],
-    )
-    chart_caption("Interest vs Principal by year (₹ crore)")
-    fig = fy_comparison_bar(
-        [f"Year {y.year}" for y in limit_result.schedule],
-        [y.principal for y in limit_result.schedule],
-        [y.interest for y in limit_result.schedule],
-        "Principal", "Interest",
-        value_fmt="₹{:,.0f}", height=320,
-    )
-    st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+        render_section("Proposed Facility", "Deal parameters - policy/analyst inputs read from the reference workbook.")
+        render_kpi_row([
+            kpi_card_html("Requested Amount", fmt_money_cr(limit_policy.requested_amount)),
+            kpi_card_html("Interest Rate", f"{limit_policy.interest_rate:.1%} p.a."),
+            kpi_card_html("Tenor", f"{limit_policy.tenor_years} years"),
+            kpi_card_html("Annual Instalment", fmt_money_cr(limit_result.annual_instalment), sublabel="Annuity: PMT(rate, tenor, amount)"),
+        ], columns_per_row=4)
 
-    render_section(
-        "Pro-forma Debt Service Position",
-        "Position after assuming the proposed loan has been disbursed, on top of existing debt service implied by EBIT / reported DSCR.",
-    )
-    render_kpi_row([
-        kpi_card_html("Implied Existing Debt Service", fmt_money_cr(limit_result.implied_existing_debt_service), sublabel="EBIT / reported DSCR"),
-        kpi_card_html("New Loan Instalment", fmt_money_cr(limit_result.annual_instalment)),
-        kpi_card_html("Total Pro-forma Debt Service", fmt_money_cr(limit_result.total_proforma_debt_service)),
-        kpi_card_html(
-            "Pro-forma DSCR", f"{limit_result.proforma_dscr:.2f}x",
-            sublabel=badge_html(limit_result.proforma_dscr_status, status_kind(limit_result.proforma_dscr_status)),
-        ),
-    ], columns_per_row=4)
-    st.caption(f"EBIT: {fmt_money_cr(limit_result.ebit)} · Policy minimum DSCR: {limit_policy.policy_minimum_dscr:.2f}x")
+        render_section("Amortization Schedule")
+        schedule_rows = [
+            {
+                "Year": y.year,
+                "Opening Balance": fmt_money_cr(y.opening_balance),
+                "Interest": fmt_money_cr(y.interest),
+                "Principal": fmt_money_cr(y.principal),
+                "Closing Balance": fmt_money_cr(y.closing_balance),
+            }
+            for y in limit_result.schedule
+        ]
+        render_html_table(
+            schedule_rows,
+            columns=["Year", "Opening Balance", "Interest", "Principal", "Closing Balance"],
+            numeric_cols=["Year", "Opening Balance", "Interest", "Principal", "Closing Balance"],
+        )
+        chart_caption("Interest vs Principal by year (₹ crore)")
+        fig = fy_comparison_bar(
+            [f"Year {y.year}" for y in limit_result.schedule],
+            [y.principal for y in limit_result.schedule],
+            [y.interest for y in limit_result.schedule],
+            "Principal", "Interest",
+            value_fmt="₹{:,.0f}", height=320,
+        )
+        st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
 
-    render_section("Debt Service Capacity & Limit Recommendation")
-    render_kpi_row([
-        kpi_card_html("Max Serviceable Debt Service", fmt_money_cr(limit_result.max_serviceable_debt_service), sublabel="EBIT / policy minimum DSCR"),
-        kpi_card_html("Available Additional Debt Service", fmt_money_cr(limit_result.available_additional_debt_service)),
-        kpi_card_html("Capacity Cap", fmt_money_cr(limit_result.capacity_cap), sublabel=f"PV annuity factor at {limit_policy.interest_rate:.0%} / {limit_policy.tenor_years}y"),
-    ], columns_per_row=3)
+        render_section(
+            "Pro-forma Debt Service Position",
+            "Position after assuming the proposed loan has been disbursed, on top of existing debt service implied by EBIT / reported DSCR.",
+        )
+        render_kpi_row([
+            kpi_card_html("Implied Existing Debt Service", fmt_money_cr(limit_result.implied_existing_debt_service), sublabel="EBIT / reported DSCR"),
+            kpi_card_html("New Loan Instalment", fmt_money_cr(limit_result.annual_instalment)),
+            kpi_card_html("Total Pro-forma Debt Service", fmt_money_cr(limit_result.total_proforma_debt_service)),
+            kpi_card_html(
+                "Pro-forma DSCR", f"{limit_result.proforma_dscr:.2f}x",
+                sublabel=badge_html(limit_result.proforma_dscr_status, status_kind(limit_result.proforma_dscr_status)),
+            ),
+        ], columns_per_row=4)
+        st.caption(f"EBIT: {fmt_money_cr(limit_result.ebit)} · Policy minimum DSCR: {limit_policy.policy_minimum_dscr:.2f}x")
 
-    chart_caption("Requested amount vs capacity cap vs recommended limit (₹ crore)")
-    fig = magnitude_bar(
-        ["(a) Requested amount", "(b) Capacity cap", "Recommended limit = MIN(a, b)"],
-        [limit_policy.requested_amount, limit_result.capacity_cap, limit_result.recommended_limit],
-        value_fmt="₹{:,.0f}", sort_desc=False,
-    )
-    st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+        render_section("Debt Service Capacity & Limit Recommendation")
+        render_kpi_row([
+            kpi_card_html("Max Serviceable Debt Service", fmt_money_cr(limit_result.max_serviceable_debt_service), sublabel="EBIT / policy minimum DSCR"),
+            kpi_card_html("Available Additional Debt Service", fmt_money_cr(limit_result.available_additional_debt_service)),
+            kpi_card_html("Capacity Cap", fmt_money_cr(limit_result.capacity_cap), sublabel=f"PV annuity factor at {limit_policy.interest_rate:.0%} / {limit_policy.tenor_years}y"),
+        ], columns_per_row=3)
+
+        chart_caption("Requested amount vs capacity cap vs recommended limit (₹ crore)")
+        fig = magnitude_bar(
+            ["(a) Requested amount", "(b) Capacity cap", "Recommended limit = MIN(a, b)"],
+            [limit_policy.requested_amount, limit_result.capacity_cap, limit_result.recommended_limit],
+            value_fmt="₹{:,.0f}", sort_desc=False,
+        )
+        st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
 
 
 
@@ -1558,7 +1690,24 @@ elif selected_area == AREAS[9]:
     )
 
     cm9_limit_policy = load_limit_setting_policy(bundle.workbook_path)
-    cm9_limit = build_limit_setting(cm9_limit_policy, fa.derived.ebit.current, d.reported_dscr.current)
+    # Same EBIT-availability guard as the Limit Setting page itself (see
+    # AREAS[6] above) - build_limit_setting() (frozen) has no None-guard
+    # of its own, and the reference workbook it replicates never has a
+    # missing input. A minimal stand-in result (a "Not available" status,
+    # matching the collateral_result/portfolio_result None-tolerant
+    # pattern already used a few lines above) lets build_credit_memo()
+    # (also frozen) read a real string from .conclusion rather than
+    # crashing on None, with no change to either frozen module.
+    if fa.derived.ebit.current is None or d.reported_dscr.current is None:
+        cm9_limit = LimitSettingResult(
+            annual_instalment=None, schedule=[], implied_existing_debt_service=None,
+            total_proforma_debt_service=None, ebit=None, proforma_dscr=None,
+            proforma_dscr_status="Not available", max_serviceable_debt_service=None,
+            available_additional_debt_service=None, capacity_cap=None,
+            recommended_limit=None, conclusion="Not available",
+        )
+    else:
+        cm9_limit = build_limit_setting(cm9_limit_policy, fa.derived.ebit.current, d.reported_dscr.current)
 
     cm9_mon_policy = load_monitoring_policy(bundle.workbook_path)
     cm9_rows_by_key = {r.key: r for r in fa.income_statement_rows + fa.ratio_rows}

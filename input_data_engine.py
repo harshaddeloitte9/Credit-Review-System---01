@@ -78,17 +78,22 @@ def compute_derived_metrics(d: ReferenceInputData) -> DerivedInputMetrics:
         pbt.current - d.total_tax_expense.current,
         pbt.previous - d.total_tax_expense.previous,
     )
+    def _sub_or_none(a, b):
+        return a - b if a is not None and b is not None else None
+
     net_finance_charges = YearFigure(
-        d.finance_costs.current - d.interest_income.current,
-        d.finance_costs.previous - d.interest_income.previous,
+        _sub_or_none(d.finance_costs.current, d.interest_income.current),
+        _sub_or_none(d.finance_costs.previous, d.interest_income.previous),
     )
     ebitda = YearFigure(
-        pbt_before_exceptional.current + net_finance_charges.current + d.depreciation.current,
-        pbt_before_exceptional.previous + net_finance_charges.previous + d.depreciation.previous,
+        pbt_before_exceptional.current + net_finance_charges.current + d.depreciation.current
+        if net_finance_charges.current is not None else None,
+        pbt_before_exceptional.previous + net_finance_charges.previous + d.depreciation.previous
+        if net_finance_charges.previous is not None else None,
     )
     ebitda_margin = YearFigure(
-        ebitda.current / d.revenue.current,
-        ebitda.previous / d.revenue.previous,
+        ebitda.current / d.revenue.current if ebitda.current is not None else None,
+        ebitda.previous / d.revenue.previous if ebitda.previous is not None else None,
     )
     # Reference workbook row 20 is labelled "EBITDA (company definition...)"
     # but its formula (B20=B12+B17, i.e. PBT-before-exceptional + Net
@@ -96,8 +101,10 @@ def compute_derived_metrics(d: ReferenceInputData) -> DerivedInputMetrics:
     # EBITDA - and DSCR/ISCR downstream are explicitly documented as
     # EBIT-based. Replicated per the formula, not the row label.
     ebit = YearFigure(
-        pbt_before_exceptional.current + net_finance_charges.current,
-        pbt_before_exceptional.previous + net_finance_charges.previous,
+        pbt_before_exceptional.current + net_finance_charges.current
+        if net_finance_charges.current is not None else None,
+        pbt_before_exceptional.previous + net_finance_charges.previous
+        if net_finance_charges.previous is not None else None,
     )
     total_debt = YearFigure(
         d.borrowings_non_current.current + d.borrowings_current.current
@@ -116,8 +123,12 @@ def compute_derived_metrics(d: ReferenceInputData) -> DerivedInputMetrics:
     # captured in Input Data.
     reconstructed_prior_prior_equity = (
         d.total_equity.previous + d.dividend_paid.previous - d.total_comprehensive_income.previous
+        if d.total_comprehensive_income.previous is not None else None
     )
-    average_equity_previous = (d.total_equity.previous + reconstructed_prior_prior_equity) / 2
+    average_equity_previous = (
+        (d.total_equity.previous + reconstructed_prior_prior_equity) / 2
+        if reconstructed_prior_prior_equity is not None else None
+    )
     average_equity = YearFigure(average_equity_current, average_equity_previous)
 
     return DerivedInputMetrics(
@@ -137,20 +148,24 @@ def compute_derived_metrics(d: ReferenceInputData) -> DerivedInputMetrics:
 
 def compute_calculated_ratios(d: ReferenceInputData, m: DerivedInputMetrics) -> CalculatedRatios:
     dscr = YearFigure(
-        m.ebit.current / (m.net_finance_charges.current + d.repayment_borrowings.current + d.lease_payment.current),
-        m.ebit.previous / (m.net_finance_charges.previous + d.repayment_borrowings.previous + d.lease_payment.previous),
+        m.ebit.current / (m.net_finance_charges.current + d.repayment_borrowings.current + d.lease_payment.current)
+        if m.ebit.current is not None and m.net_finance_charges.current is not None else None,
+        m.ebit.previous / (m.net_finance_charges.previous + d.repayment_borrowings.previous + d.lease_payment.previous)
+        if m.ebit.previous is not None and m.net_finance_charges.previous is not None else None,
     )
     iscr = YearFigure(
-        m.ebit.current / m.net_finance_charges.current,
-        m.ebit.previous / m.net_finance_charges.previous,
+        m.ebit.current / m.net_finance_charges.current
+        if m.ebit.current is not None and m.net_finance_charges.current is not None else None,
+        m.ebit.previous / m.net_finance_charges.previous
+        if m.ebit.previous is not None and m.net_finance_charges.previous is not None else None,
     )
     current_ratio = YearFigure(
         d.current_assets.current / (d.current_liabilities.current - d.lease_liabilities_current.current),
         d.current_assets.previous / (d.current_liabilities.previous - d.lease_liabilities_current.previous),
     )
     debt_equity = YearFigure(
-        m.net_debt.current / m.average_equity.current,
-        m.net_debt.previous / m.average_equity.previous,
+        m.net_debt.current / m.average_equity.current if m.average_equity.current is not None else None,
+        m.net_debt.previous / m.average_equity.previous if m.average_equity.previous is not None else None,
     )
     debt_assets = YearFigure(
         m.total_debt.current / d.total_assets.current,
@@ -205,6 +220,9 @@ def run_validation_checks(d: ReferenceInputData, m: DerivedInputMetrics) -> list
     c = compute_calculated_ratios(d, m)
 
     def tie(cell, label, calc, reported, tol):
+        if calc is None:
+            checks.append(ValidationCheck(cell, label, "N/A - required input not available"))
+            return
         checks.append(ValidationCheck(
             cell, label,
             "PASS - ties" if abs(calc - reported) <= tol else "CHECK",

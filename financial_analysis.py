@@ -73,6 +73,9 @@ def build_financial_analysis(bundle: ReferenceBundle) -> FinancialAnalysisResult
     m = compute_derived_metrics(d)
     c = compute_calculated_ratios(d, m)
 
+    def _fmt_or_na(value, suffix=""):
+        return f"{value:.4f}{suffix}" if value is not None else "not available"
+
     rows1 = []
     rows2 = []
     statuses_used_for_gate = []
@@ -101,12 +104,19 @@ def build_financial_analysis(bundle: ReferenceBundle) -> FinancialAnalysisResult
          lambda cur, pct: pct is not None and pct >= policy["revenue"],
          "input (1-Input Data B5/C5)")
 
-    ebitda_margin_pct_cur = m.ebitda_margin.current * 100
-    ebitda_margin_pct_prev = m.ebitda_margin.previous * 100
-    add1("ebitda_margin_growth", "EBITDA Margin %", ebitda_margin_pct_cur, ebitda_margin_pct_prev,
-         policy["ebitda_margin_growth"],
-         lambda cur, pct: pct is not None and pct >= policy["ebitda_margin_growth"],
-         "calculated = EBITDA / Revenue (1-Input Data B18/B5 formula chain)")
+    ebitda_margin_pct_cur = m.ebitda_margin.current * 100 if m.ebitda_margin.current is not None else None
+    ebitda_margin_pct_prev = m.ebitda_margin.previous * 100 if m.ebitda_margin.previous is not None else None
+    if ebitda_margin_pct_cur is None or ebitda_margin_pct_prev is None:
+        rows1.append(MetricRow(
+            "ebitda_margin_growth", "EBITDA Margin %", None, None, None,
+            policy.get("ebitda_margin_growth"), None, "not available",
+            "Requires Interest Income, which this document does not separately report in the P&L.",
+        ))
+    else:
+        add1("ebitda_margin_growth", "EBITDA Margin %", ebitda_margin_pct_cur, ebitda_margin_pct_prev,
+             policy["ebitda_margin_growth"],
+             lambda cur, pct: pct is not None and pct >= policy["ebitda_margin_growth"],
+             "calculated = EBITDA / Revenue (1-Input Data B18/B5 formula chain)")
 
     add1("net_profit", "Net Profit", m.net_profit.current, m.net_profit.previous,
          policy["net_profit"],
@@ -118,13 +128,21 @@ def build_financial_analysis(bundle: ReferenceBundle) -> FinancialAnalysisResult
          lambda cur, pct: pct is not None and pct >= policy["total_assets"],
          "input (1-Input Data B24/C24)")
 
-    add1("net_worth", "Net Worth", d.reported_net_worth.current, d.reported_net_worth.previous,
-         policy["net_worth"],
-         lambda cur, pct: pct is not None and pct >= policy["net_worth"],
-         "input, Reported Ratios block (1-Input Data B56/D56)",
-         "This is the company's disclosed Net Worth, not Total Equity (B25). The two differ "
-         "by about 2.4% in FY-current; no reconciliation formula ties them in the reference "
-         "workbook, so the disclosed figure is used as-is. See validation report.")
+    if d.reported_net_worth.current is None or d.reported_net_worth.previous is None:
+        rows1.append(MetricRow(
+            "net_worth", "Net Worth", None, None, None,
+            policy["net_worth"], None, "not available",
+            "The source document's reported figure for this field was too ambiguous/garbled to "
+            "safely extract (see the OCR diagnostic).",
+        ))
+    else:
+        add1("net_worth", "Net Worth", d.reported_net_worth.current, d.reported_net_worth.previous,
+             policy["net_worth"],
+             lambda cur, pct: pct is not None and pct >= policy["net_worth"],
+             "input, Reported Ratios block (1-Input Data B56/D56)",
+             "This is the company's disclosed Net Worth, not Total Equity (B25). The two differ "
+             "by about 2.4% in FY-current; no reconciliation formula ties them in the reference "
+             "workbook, so the disclosed figure is used as-is. See validation report.")
 
     add1("operating_cash_flow", "Operating Cash Flow", d.operating_cash_flow.current, d.operating_cash_flow.previous,
          policy["operating_cash_flow"],
@@ -161,14 +179,14 @@ def build_financial_analysis(bundle: ReferenceBundle) -> FinancialAnalysisResult
     add2("debt_equity", "Debt-Equity", d.reported_debt_equity.current, d.reported_debt_equity.previous,
          policy["debt_equity"], lambda cur: cur >= 0.5,
          "input, Reported Ratios block (1-Input Data B52/D52)",
-         f"Calculated cross-check (Net Debt / Average Equity) = {c.debt_equity.current:.4f}x "
-         f"FY-current / {c.debt_equity.previous:.4f}x FY-previous - ties within tolerance.")
+         f"Calculated cross-check (Net Debt / Average Equity) = {_fmt_or_na(c.debt_equity.current, 'x')} "
+         f"FY-current / {_fmt_or_na(c.debt_equity.previous, 'x')} FY-previous - ties within tolerance.")
 
     add2("dscr", "DSCR", d.reported_dscr.current, d.reported_dscr.previous,
          policy["dscr"], lambda cur: cur >= 1.5,
          "input, Reported Ratios block (1-Input Data B49/D49)",
          f"Calculated cross-check (EBIT / (Net Finance Charges + Principal Repayments)) = "
-         f"{c.dscr.current:.4f}x FY-current / {c.dscr.previous:.4f}x FY-previous - does NOT tie "
+         f"{_fmt_or_na(c.dscr.current, 'x')} FY-current / {_fmt_or_na(c.dscr.previous, 'x')} FY-previous - does NOT tie "
          f"to the reported figure. '1-Input Data' defines no reconciliation check for this pair "
          f"(unlike EBITDA margin, net profit margin, debt/assets and debt-equity, which all have "
          f"one). Flagged, not guessed - see validation report.")
@@ -176,8 +194,8 @@ def build_financial_analysis(bundle: ReferenceBundle) -> FinancialAnalysisResult
     add2("iscr", "ISCR", d.reported_iscr.current, d.reported_iscr.previous,
          policy["iscr"], lambda cur: cur >= 3,
          "input, Reported Ratios block (1-Input Data B50/D50)",
-         f"Calculated cross-check (EBIT / Net Finance Charges) = {c.iscr.current:.4f}x "
-         f"FY-current / {c.iscr.previous:.4f}x FY-previous - does not tie closely to the "
+         f"Calculated cross-check (EBIT / Net Finance Charges) = {_fmt_or_na(c.iscr.current, 'x')} "
+         f"FY-current / {_fmt_or_na(c.iscr.previous, 'x')} FY-previous - does not tie closely to the "
          f"reported figure. Flagged - see validation report.")
 
     add2("current_ratio", "Current Ratio", d.reported_current_ratio.current, d.reported_current_ratio.previous,
@@ -206,9 +224,16 @@ def build_financial_analysis(bundle: ReferenceBundle) -> FinancialAnalysisResult
         "'1-Input Data'. Not computed - the reference workbook's static value is not reproduced.",
     ))
 
-    add2("ebitda_margin_pct", "EBITDA Margin %", ebitda_margin_pct_cur, ebitda_margin_pct_prev,
-         policy["ebitda_margin_pct"], lambda cur: cur > 15,
-         "calculated = EBITDA / Revenue (1-Input Data B18/B5 formula chain)")
+    if ebitda_margin_pct_cur is None or ebitda_margin_pct_prev is None:
+        rows2.append(MetricRow(
+            "ebitda_margin_pct", "EBITDA Margin %", None, None, None,
+            policy.get("ebitda_margin_pct"), None, "not available",
+            "Requires Interest Income, which this document does not separately report in the P&L.",
+        ))
+    else:
+        add2("ebitda_margin_pct", "EBITDA Margin %", ebitda_margin_pct_cur, ebitda_margin_pct_prev,
+             policy["ebitda_margin_pct"], lambda cur: cur > 15,
+             "calculated = EBITDA / Revenue (1-Input Data B18/B5 formula chain)")
 
     net_profit_margin_pct_cur = c.net_profit_margin.current * 100
     net_profit_margin_pct_prev = c.net_profit_margin.previous * 100

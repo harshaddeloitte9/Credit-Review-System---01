@@ -74,6 +74,13 @@ def build_demo_workbook(extracted_sheet_path=EXTRACTED_SHEET_PATH,
         raise DemoSourceError(f"'{extracted_sheet_path}' has no '{INPUT_SHEET}' sheet.")
     source_ws = extracted_wb[INPUT_SHEET]
 
+    # Opened a second time, with formulas preserved as text instead of
+    # resolved to their cached result, purely to detect (below) which
+    # source cells are template-native formula cells rather than
+    # extracted reported figures.
+    extracted_wb_formulas = load_workbook(extracted_sheet_path, data_only=False)
+    source_ws_formulas = extracted_wb_formulas[INPUT_SHEET]
+
     shutil.copy(policy_workbook_path, _MERGED_DEMO_PATH)
     merged_wb = load_workbook(_MERGED_DEMO_PATH, data_only=False)
     if INPUT_SHEET not in merged_wb.sheetnames:
@@ -82,6 +89,24 @@ def build_demo_workbook(extracted_sheet_path=EXTRACTED_SHEET_PATH,
 
     for row in source_ws.iter_rows():
         for cell in row:
+            # A cell whose source text is itself a formula (e.g. "=B7-B8")
+            # is a template-native calculated cell, not an extracted
+            # reported figure - the target already carries that same
+            # formula from its own copy of the template, so it is left
+            # untouched. Reading it via the data_only=True handle above
+            # would give its cached result if one exists, or None if the
+            # source file was produced by openpyxl and never opened by
+            # real Excel to compute one; either way, copying it over would
+            # replace a live formula with a static (and possibly absent)
+            # number, which is never correct for a formula cell.
+            source_formula_cell = source_ws_formulas[cell.coordinate]
+            is_formula = (
+                isinstance(source_formula_cell.value, str)
+                and source_formula_cell.value.startswith("=")
+            )
+            if is_formula:
+                continue
+
             target_cell = target_ws[cell.coordinate]
             # A75:D77 is a merged footer range in this template - only its
             # top-left anchor cell is writable; the rest are intentionally
