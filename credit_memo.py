@@ -120,25 +120,36 @@ def build_credit_memo(fa, risk, covenants_result, collateral_result, limit_resul
     fb_status = _fmt_cr_or_review(fb_result.fb_requirement if fb_result else None)
     nfb_status = _fmt_cr_or_review(nfb_result.assessed_nfb_limit if nfb_result else None)
 
+    # "Area N" labels below match the app's CURRENT sidebar navigation
+    # position for each area (Data Upload=1, Input & Validation=2,
+    # Financial Analysis=3, Covenant Monitoring=4, Collateral Assessment=5,
+    # Limit Setting=6, Portfolio Monitoring=7, Credit Memo=8, Risk
+    # Scoring=9) - not the original reference workbook's own sheet
+    # numbers ('2-Financial Analysis', '3-Risk Scoring', etc.), which no
+    # longer match since Risk Scoring moved to the end of the app's
+    # navigation as an "Additional Feature". Risk Scoring's own card is
+    # likewise placed last in this list, matching that same repositioning,
+    # rather than appearing second (right after Financial Analysis) as it
+    # did under the old sheet-based ordering.
     areas = [
-        CreditMemoArea("Area 2 - Financial Analysis & Interpretation", fa.overall_status, commentary["financial_analysis"]),
-        CreditMemoArea("Area 3 - Risk Scoring", risk.overall_status, commentary["risk_scoring"]),
-        CreditMemoArea("Covenant Assessment — Financial Covenants", covenants_result.overall_status, commentary["covenants"]),
-        CreditMemoArea("Covenant Assessment — Continuous / Early-Warning Monitoring", monitoring_result.overall_status, commentary["continuous_monitoring"]),
-        CreditMemoArea("Covenant Assessment — Non-Financial Covenants", "Not Available / Requires Review",
+        CreditMemoArea("Area 3 - Financial Analysis & Interpretation", fa.overall_status, commentary["financial_analysis"]),
+        CreditMemoArea("Area 4 - Covenant Assessment — Financial Covenants", covenants_result.overall_status, commentary["covenants"]),
+        CreditMemoArea("Area 4 - Covenant Assessment — Continuous / Early-Warning Monitoring", monitoring_result.overall_status, commentary["continuous_monitoring"]),
+        CreditMemoArea("Area 4 - Covenant Assessment — Non-Financial Covenants", "Not Available / Requires Review",
                        "No field in the uploaded financial statement or the reference workbook captures "
                        "non-financial covenant compliance (borrowing restrictions, negative pledge, change "
                        "of control, asset disposal, regulatory/environmental compliance) - status is not "
                        "fabricated in its absence."),
         CreditMemoArea("Area 5 - Collateral Assessment", collateral_status, commentary["collateral_assessment"]),
         CreditMemoArea("Area 6 - Proposed Loan Impact & Limit Recommendation", limit_conclusion, commentary["limit_setting"]),
-        CreditMemoArea("Limit Setting — Fund-Based (FB) Assessment", fb_status,
+        CreditMemoArea("Area 6 - Limit Setting — Fund-Based (FB) Assessment", fb_status,
                        "Analyst-entered working-capital assessment (Limit Setting page) - no reference "
                        "workbook commentary applies."),
-        CreditMemoArea("Limit Setting — Non-Fund-Based (NFB) Assessment", nfb_status,
+        CreditMemoArea("Area 6 - Limit Setting — Non-Fund-Based (NFB) Assessment", nfb_status,
                        "Analyst-entered LC/BG assessment (Limit Setting page) - no reference workbook "
                        "commentary applies."),
-        CreditMemoArea("Area 8 - Portfolio Monitoring", portfolio_status, commentary["portfolio_monitoring"]),
+        CreditMemoArea("Area 7 - Portfolio Monitoring", portfolio_status, commentary["portfolio_monitoring"]),
+        CreditMemoArea("Area 9 - Risk Scoring", risk.overall_status, commentary["risk_scoring"]),
     ]
 
     return CreditMemoResult(areas=areas)
