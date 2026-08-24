@@ -109,6 +109,14 @@ _FA_CELL_MAP = {
     "debt_assets": ("C22", "D22", 0.005),
     "ebitda_margin_pct": ("C25", "D25", 0.05),
     "net_profit_margin_pct": ("C26", "D26", 0.05),
+    # Real comparison, not a skip - now that financial_analysis.py has a
+    # genuine source for these two (this document's own disclosed
+    # Debtors/Inventory turnover ratio, see that module's docstring),
+    # this ties them against the policy workbook's own C23/D23-C24/D24
+    # reference figures the same way as every other row above. Tolerance
+    # 1.0 (whole-day rounding), matching PNL_TIE_TOLERANCE's precedent.
+    "debtors_days": ("C23", "D23", 1.0),
+    "inventory_days": ("C24", "D24", 1.0),
 }
 
 
@@ -123,13 +131,6 @@ def validate_financial_analysis(fa_result, workbook_path):
         row = rows_by_key[key]
         results.append(_compare(f"{row.label} (FY-current, {cur_cell})", row.current, ws[cur_cell].value, tol))
         results.append(_compare(f"{row.label} (FY-previous, {prev_cell})", row.previous, ws[prev_cell].value, tol))
-
-    for key, cell in (("debtors_days", "C23"), ("inventory_days", "C24")):
-        row = rows_by_key[key]
-        results.append(ValidationRow(
-            f"{row.label} (FY-current, {cell})", None, ws[cell].value, None,
-            "NOT COMPARABLE - required source data not present in 1-Input Data",
-        ))
 
     results.append(_compare("Overall status (B3)", fa_result.overall_status, ws["B3"].value, 0))
     return results

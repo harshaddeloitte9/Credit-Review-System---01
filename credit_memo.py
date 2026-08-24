@@ -2,7 +2,7 @@
 Area 9 - Credit Memo: Summary.
 
 Terminal aggregator - '9 - Credit Memo' has no calculations of its own; it
-only pulls a single status cell out of each of the other 7 areas:
+pulls a single status cell out of each of the other areas:
     B4  = '2-Financial Analysis'!B3    (Overall status: Approve/Reject)
     B8  = '3-Risk Scoring'!B10         (Overall status: risk grade text)
     B12 = '4-Covenants'!E14            (Overall Status: PASS/NOT PASS)
@@ -11,8 +11,27 @@ only pulls a single status cell out of each of the other 7 areas:
     B24 = '7-Continuous Monitoring'!D10 (Overall Status: PASS/NOT PASS)
     B28 = '8-Portfolio Monitoring'!B4  (Overall status: Approve/Reject)
 
-This module therefore does nothing but collect the already-computed
-results of financial_analysis.py / risk_scoring.py (frozen) and
+At stakeholder request, Continuous Monitoring is no longer shown as its
+own standalone area (in the navigation or here) - its status is folded
+into a "Covenant Assessment" grouping alongside financial and
+non-financial covenant status, since app.py's Covenant Monitoring page
+now presents all three together. B24's narrative (read by
+load_credit_memo_commentary(), unchanged) is still sourced and shown -
+just under that merged grouping instead of its own area. Non-financial
+covenant status is always "Not Available / Requires Review" here, same
+as on the Covenant Monitoring page - no field anywhere in this
+application's data sources supports computing it.
+
+Fund-Based / Non-Fund-Based Limit Setting (fb_result / nfb_result,
+optional) are likewise displayed, not computed, here - they are already-
+computed results app.py builds from the analyst-entered inputs on the
+Limit Setting page (see limit_setting.py's build_fund_based_limit /
+build_non_fund_based_limit) and simply passes in, the same way every
+other *_result parameter below is a pre-built object, not raw data this
+module derives anything from.
+
+This module therefore does nothing but collect and format the already-
+computed results of financial_analysis.py / risk_scoring.py (frozen) and
 covenants.py / collateral_assessment.py / limit_setting.py /
 continuous_monitoring.py / portfolio_monitoring.py (built earlier in this
 same pass) - it re-derives none of them.
@@ -79,24 +98,46 @@ def load_credit_memo_commentary(workbook_path) -> dict:
     }
 
 
+def _fmt_cr_or_review(value):
+    return "Not Available / Requires Review" if value is None else f"₹{value:,.0f} Cr"
+
+
 def build_credit_memo(fa, risk, covenants_result, collateral_result, limit_result,
-                       monitoring_result, portfolio_result, commentary: dict) -> CreditMemoResult:
+                       monitoring_result, portfolio_result, commentary: dict,
+                       fb_result=None, nfb_result=None) -> CreditMemoResult:
     """collateral_result / portfolio_result may be None when
     collateral_assessment.load_collateral_inputs / portfolio_monitoring.
     load_portfolio_inputs found no data for this workbook (see their own
     docstrings) - shown as "Not available" here rather than crashing or
-    silently reusing a stale/other borrower's result."""
+    silently reusing a stale/other borrower's result. fb_result /
+    nfb_result may be None (or carry None fields) when the analyst has
+    not yet entered Fund-Based/Non-Fund-Based inputs on the Limit Setting
+    page for this borrower - shown as "Not Available / Requires Review",
+    never a fabricated figure."""
     limit_conclusion = limit_result.conclusion if isinstance(limit_result.conclusion, str) else "FALSE"
     collateral_status = collateral_result.rating if collateral_result else "Not available"
     portfolio_status = portfolio_result.overall_status if portfolio_result else "Not available"
+    fb_status = _fmt_cr_or_review(fb_result.fb_requirement if fb_result else None)
+    nfb_status = _fmt_cr_or_review(nfb_result.assessed_nfb_limit if nfb_result else None)
 
     areas = [
         CreditMemoArea("Area 2 - Financial Analysis & Interpretation", fa.overall_status, commentary["financial_analysis"]),
         CreditMemoArea("Area 3 - Risk Scoring", risk.overall_status, commentary["risk_scoring"]),
-        CreditMemoArea("Area 4 - Covenant Monitoring", covenants_result.overall_status, commentary["covenants"]),
+        CreditMemoArea("Covenant Assessment — Financial Covenants", covenants_result.overall_status, commentary["covenants"]),
+        CreditMemoArea("Covenant Assessment — Continuous / Early-Warning Monitoring", monitoring_result.overall_status, commentary["continuous_monitoring"]),
+        CreditMemoArea("Covenant Assessment — Non-Financial Covenants", "Not Available / Requires Review",
+                       "No field in the uploaded financial statement or the reference workbook captures "
+                       "non-financial covenant compliance (borrowing restrictions, negative pledge, change "
+                       "of control, asset disposal, regulatory/environmental compliance) - status is not "
+                       "fabricated in its absence."),
         CreditMemoArea("Area 5 - Collateral Assessment", collateral_status, commentary["collateral_assessment"]),
         CreditMemoArea("Area 6 - Proposed Loan Impact & Limit Recommendation", limit_conclusion, commentary["limit_setting"]),
-        CreditMemoArea("Area 7 - Continuous Monitoring", monitoring_result.overall_status, commentary["continuous_monitoring"]),
+        CreditMemoArea("Limit Setting — Fund-Based (FB) Assessment", fb_status,
+                       "Analyst-entered working-capital assessment (Limit Setting page) - no reference "
+                       "workbook commentary applies."),
+        CreditMemoArea("Limit Setting — Non-Fund-Based (NFB) Assessment", nfb_status,
+                       "Analyst-entered LC/BG assessment (Limit Setting page) - no reference workbook "
+                       "commentary applies."),
         CreditMemoArea("Area 8 - Portfolio Monitoring", portfolio_status, commentary["portfolio_monitoring"]),
     ]
 

@@ -52,6 +52,38 @@ def _ensure_work_dir():
     os.makedirs(UPLOAD_WORK_DIR, exist_ok=True)
 
 
+def _pdf_content_hash(pdf_path):
+    """SHA-256 of the PDF's own bytes (not its filename) - two uploads of
+    the exact same document hash identically regardless of what the file
+    is named, so a re-upload can be recognized as "already OCR'd" even if
+    renamed."""
+    digest = hashlib.sha256()
+    with open(pdf_path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _cached_ocr_path(pdf_hash):
+    return os.path.join(UPLOAD_WORK_DIR, f"raw_ocr_cache_{pdf_hash}.txt")
+
+
+def get_cached_ocr_text(pdf_path):
+    """Returns the previously-saved OCR text for this exact PDF content,
+    or None if no cached result exists yet - never calls the OCR provider.
+    Exposed for callers (e.g. the Data Upload UI) that want to know
+    up front whether an upload will need a fresh OCR call before
+    triggering process_uploaded_pdf()."""
+    _ensure_work_dir()
+    cache_path = _cached_ocr_path(_pdf_content_hash(pdf_path))
+    if os.path.exists(cache_path):
+        with open(cache_path, "r", encoding="utf-8") as f:
+            text = f.read()
+        if text:
+            return text
+    return None
+
+
 def _run_llmwhisperer_via_curl(pdf_path):
     """Exact transport-only fallback validated during the OCR pipeline
     audit: every parameter, the auth header, and the async status-polling/
@@ -204,37 +236,94 @@ def _anonymize_header(workbook_path):
     wb.save(workbook_path)
 
 
-def process_uploaded_pdf(pdf_path, original_filename):
+def _notify(status_callback, stage, state, detail=None):
+    if status_callback is not None:
+        status_callback(stage, state, detail)
+
+
+def process_uploaded_pdf(pdf_path, original_filename, status_callback=None):
     """End-to-end: PDF -> OCR -> extraction -> fresh workbook (from the
     unmodified template) -> merged with the policy workbook. Returns a
     dict with every artifact the UI needs. Raises OcrUploadError /
     ocr_pipeline / demo_source's own exceptions on failure - nothing here
-    invents a fallback value."""
+    invents a fallback value.
+
+    status_callback(stage, state, detail=None), if given, is called at
+    each real step boundary below (stage in "ocr"/"extraction"/
+    "population"; state in "processing"/"complete"/"reused"/"failed") so
+    a caller (the Data Upload UI) can show genuine per-stage progress
+    rather than a simulated one. Optional and side-effect-free when
+    omitted - no behavior here depends on it.
+
+    If OCR has already been run for this exact PDF content (by SHA-256,
+    not filename) in a previous call, the cached result is reused and the
+    OCR provider is not called again - see _pdf_content_hash /
+    get_cached_ocr_text. Extraction and workbook population always run
+    fresh from that text regardless, since they are local/deterministic
+    and not the quota-limited step."""
 
     _ensure_work_dir()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    ocr_text, raw_result = run_ocr(pdf_path)
+    pdf_hash = _pdf_content_hash(pdf_path)
+    cache_path = _cached_ocr_path(pdf_hash)
+    ocr_text = None
+    ocr_reused = False
+    if os.path.exists(cache_path):
+        with open(cache_path, "r", encoding="utf-8") as f:
+            cached_text = f.read()
+        if cached_text:
+            ocr_text = cached_text
+            ocr_reused = True
 
+    if ocr_reused:
+        _notify(status_callback, "ocr", "reused")
+    else:
+        _notify(status_callback, "ocr", "processing")
+        try:
+            ocr_text, raw_result = run_ocr(pdf_path)
+        except Exception as exc:
+            _notify(status_callback, "ocr", "failed", str(exc))
+            raise
+        with open(cache_path, "w", encoding="utf-8") as f:
+            f.write(ocr_text)
+        _notify(status_callback, "ocr", "complete")
+
+    # Kept as a per-upload, timestamp-named artifact (the existing "Raw
+    # OCR Output" download button reads this path) regardless of whether
+    # this call hit the content-hash cache above - only the OCR provider
+    # call itself is ever skipped, not this artifact.
     raw_txt_path = os.path.join(UPLOAD_WORK_DIR, f"raw_ocr_{timestamp}.txt")
     with open(raw_txt_path, "w", encoding="utf-8") as f:
         f.write(ocr_text)
 
-    extracted, debug_rows, meta = ocr_pipeline.extract_financial_values(
-        ocr_text, ocr_pipeline.TEMPLATE_FILE
-    )
-
-    wb = ocr_pipeline.populate_workbook(ocr_pipeline.TEMPLATE_FILE, extracted)
-    extracted_xlsx_path = os.path.join(
-        UPLOAD_WORK_DIR, f"extracted_{timestamp}.xlsx"
-    )
-    wb.save(extracted_xlsx_path)
-    _anonymize_header(extracted_xlsx_path)
-
+    _notify(status_callback, "extraction", "processing")
     try:
-        merged_path = build_demo_workbook(extracted_sheet_path=extracted_xlsx_path)
-    except DemoSourceError as exc:
-        raise OcrUploadError(f"Could not merge extracted data with the policy workbook: {exc}") from exc
+        extracted, debug_rows, meta = ocr_pipeline.extract_financial_values(
+            ocr_text, ocr_pipeline.TEMPLATE_FILE
+        )
+    except Exception as exc:
+        _notify(status_callback, "extraction", "failed", str(exc))
+        raise
+    _notify(status_callback, "extraction", "complete")
+
+    _notify(status_callback, "population", "processing")
+    try:
+        wb = ocr_pipeline.populate_workbook(ocr_pipeline.TEMPLATE_FILE, extracted)
+        extracted_xlsx_path = os.path.join(
+            UPLOAD_WORK_DIR, f"extracted_{timestamp}.xlsx"
+        )
+        wb.save(extracted_xlsx_path)
+        _anonymize_header(extracted_xlsx_path)
+
+        try:
+            merged_path = build_demo_workbook(extracted_sheet_path=extracted_xlsx_path)
+        except DemoSourceError as exc:
+            raise OcrUploadError(f"Could not merge extracted data with the policy workbook: {exc}") from exc
+    except Exception as exc:
+        _notify(status_callback, "population", "failed", str(exc))
+        raise
+    _notify(status_callback, "population", "complete")
 
     status_counts = {
         "CORRECT": 0, "NOT_FOUND_IN_OCR": 0, "AMBIGUOUS": 0, "NORMALIZED_FROM_OCR": 0,
@@ -265,4 +354,5 @@ def process_uploaded_pdf(pdf_path, original_filename):
         "debug_rows": debug_rows,
         "status_counts": status_counts,
         "total_fields": len(debug_rows),
+        "ocr_reused": ocr_reused,
     }

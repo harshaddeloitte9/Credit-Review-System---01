@@ -176,6 +176,20 @@ ROW_MAPPING = {
     "Operating EBITDA margin": 54,
     "Net profit margin": 55,
     "Net worth": 56,
+
+    # Reported Ratios (continued) - added rows 74 and 78, appended after
+    # the sheet's original last row (73) rather than inserted into the
+    # block above, so no other module's hardcoded cell reference shifts.
+    # Row 78, not 75: the *policy* workbook's own '1-Input Data' sheet has
+    # a pre-existing merged footer range at A75:D77 (confirmed by testing
+    # the full extraction->merge pipeline, not assumed) - row 75 would
+    # have silently failed to merge into any borrower's active dataset.
+    # Same Regulation 52(4) disclosure table as DSCR/ISCR/etc. above
+    # (items #9 and #10 in that table) - the company's own pre-computed
+    # ratio, not something derived here from raw Trade Receivables/
+    # Inventory figures (which this template still has no rows for).
+    "Debtors turnover": 74,
+    "Inventory turnover": 78,
 }
 
 # Rows whose Excel number format is a native percentage ("0.00%").
@@ -283,6 +297,8 @@ FIELD_SECTION = {
     "Operating EBITDA margin": "RATIO",
     "Net profit margin": "RATIO",
     "Net worth": "RATIO",
+    "Debtors turnover": "RATIO",
+    "Inventory turnover": "RATIO",
 }
 
 # Fields whose qualifier ("non-current" / "current") is only stated
@@ -557,6 +573,16 @@ ALIASES = {
 
     "Net worth": [
         "net worth",
+    ],
+
+    "Debtors turnover": [
+        "debtors turnover ratio (in days)",
+        "debtors turnover ratio",
+    ],
+
+    "Inventory turnover": [
+        "inventory turnover ratio (in days)",
+        "inventory turnover ratio",
     ],
 }
 

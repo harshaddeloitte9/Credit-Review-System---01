@@ -98,6 +98,14 @@ class ReferenceInputData:
     reported_net_profit_margin: YearFigure
     reported_net_worth: YearFigure
 
+    # Same Regulation 52(4) disclosure block as the eight fields above
+    # (rows 74 and 78, appended after the sheet's original row 73 - see
+    # ocr_pipeline.py's ROW_MAPPING comment for why row 78, not 75).
+    # Genuinely None (not a fabricated figure) for any document that
+    # doesn't disclose these two ratios - not every filing includes them.
+    reported_debtors_turnover_days: YearFigure
+    reported_inventory_turnover_days: YearFigure
+
     # "Reported (validation)" column D - current year only, no FY-previous
     # equivalent exists in the sheet
     reported_total_income_current: float
@@ -260,6 +268,8 @@ def _load_input_data(ws) -> ReferenceInputData:
         reported_ebitda_margin=_year_figure(ws, "B54", "D54"),
         reported_net_profit_margin=_year_figure(ws, "B55", "D55"),
         reported_net_worth=_year_figure(ws, "B56", "D56"),
+        reported_debtors_turnover_days=_year_figure(ws, "B74", "D74"),
+        reported_inventory_turnover_days=_year_figure(ws, "B78", "D78"),
 
         reported_total_income_current=_num(ws, "D7"),
         reported_pbt_before_exceptional_current=_num(ws, "D12"),

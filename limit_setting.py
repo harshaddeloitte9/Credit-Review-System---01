@@ -40,6 +40,7 @@ else in this workbook - reproduced here as a computed comparison
 """
 
 from dataclasses import dataclass
+from typing import Optional
 
 from openpyxl import load_workbook
 
@@ -139,3 +140,103 @@ def build_limit_setting(policy: LimitSettingPolicy, ebit: float, reported_dscr: 
         recommended_limit=recommended_limit,
         conclusion=conclusion,
     )
+
+
+# ============================================================
+# Fund-Based (FB) / Non-Fund-Based (NFB) Limit Assessment
+#
+# Added alongside (not replacing) the term-loan/DSCR engine above, at
+# stakeholder request. Unlike everything else in this module, none of
+# these inputs have a source cell in the reference workbook - it has no
+# working-capital or trade-finance concept anywhere in its 11 sheets -
+# and the OCR-extracted Input Data schema has no Inventory/Receivable/
+# Payable Days, Sanctioned Limit, Utilisation, LC or BG fields either.
+# So, unlike every other module in this application, these inputs are
+# analyst-entered per review (see app.py's Limit Setting and Credit
+# Memo pages) rather than read from a workbook or an uploaded PDF.
+#
+# Formulas are exactly the arithmetic from the stakeholder's worked
+# example, generalized to whatever the analyst enters for this
+# borrower - nothing more elaborate:
+#   NWC cycle days              = Inventory Days + Receivable Days - Payable Days
+#   Working-capital requirement = Annual Sales * NWC cycle days / 365
+#   Borrower contribution       = Working-capital requirement * Contribution % / 100
+#   FB requirement               = Working-capital requirement - Borrower contribution
+#   Assessed NFB limit          = Peak LC Requirement + Peak BG Requirement
+#
+# A field that depends on a missing (None) input is None, never a
+# fabricated number - app.py renders None as "Not Available / Requires
+# Review" rather than treating a blank entry as zero.
+# ============================================================
+
+
+@dataclass(frozen=True)
+class FundBasedInputs:
+    annual_sales: Optional[float]
+    inventory_days: Optional[float]
+    receivable_days: Optional[float]
+    payable_days: Optional[float]
+    contribution_pct: Optional[float]
+
+
+@dataclass(frozen=True)
+class FundBasedResult:
+    nwc_cycle_days: Optional[float]
+    wc_requirement: Optional[float]
+    borrower_contribution_amount: Optional[float]
+    fb_requirement: Optional[float]
+
+
+@dataclass(frozen=True)
+class NonFundBasedInputs:
+    annual_imports: Optional[float]
+    peak_lc_requirement: Optional[float]
+    contractual_obligations: Optional[float]
+    peak_bg_requirement: Optional[float]
+
+
+@dataclass(frozen=True)
+class NonFundBasedResult:
+    assessed_nfb_limit: Optional[float]
+
+
+def build_fund_based_limit(inputs: FundBasedInputs) -> FundBasedResult:
+    if (
+        inputs.inventory_days is None
+        or inputs.receivable_days is None
+        or inputs.payable_days is None
+    ):
+        nwc_cycle_days = None
+    else:
+        nwc_cycle_days = inputs.inventory_days + inputs.receivable_days - inputs.payable_days
+
+    if inputs.annual_sales is None or nwc_cycle_days is None:
+        wc_requirement = None
+    else:
+        wc_requirement = inputs.annual_sales * nwc_cycle_days / 365
+
+    if wc_requirement is None or inputs.contribution_pct is None:
+        borrower_contribution_amount = None
+    else:
+        borrower_contribution_amount = wc_requirement * inputs.contribution_pct / 100
+
+    if wc_requirement is None or borrower_contribution_amount is None:
+        fb_requirement = None
+    else:
+        fb_requirement = wc_requirement - borrower_contribution_amount
+
+    return FundBasedResult(
+        nwc_cycle_days=nwc_cycle_days,
+        wc_requirement=wc_requirement,
+        borrower_contribution_amount=borrower_contribution_amount,
+        fb_requirement=fb_requirement,
+    )
+
+
+def build_non_fund_based_limit(inputs: NonFundBasedInputs) -> NonFundBasedResult:
+    if inputs.peak_lc_requirement is None or inputs.peak_bg_requirement is None:
+        assessed_nfb_limit = None
+    else:
+        assessed_nfb_limit = inputs.peak_lc_requirement + inputs.peak_bg_requirement
+
+    return NonFundBasedResult(assessed_nfb_limit=assessed_nfb_limit)

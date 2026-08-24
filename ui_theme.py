@@ -12,8 +12,10 @@ styling or layout update.
 Colors follow the project's validated reference palette: a single sequential
 blue for magnitude comparisons, a light/dark blue pair for "prior vs current
 period" bars (one hue, two shades - not two unrelated categorical colors),
-and a fixed four-step status palette (good/warning/serious/critical) for
-badges and risk bands - never re-purposed for anything else.
+and a fixed status palette (good/warning/serious/critical/neutral, plus
+processing - the existing BLUE accent, for an in-progress pipeline stage)
+for badges, risk bands and stage indicators - never re-purposed for
+anything else.
 """
 
 import streamlit as st
@@ -43,6 +45,10 @@ STATUS = {
     "serious": {"bg": "#ec835a", "text": "#0b0b0b", "tint": "#fbe8e0"},
     "critical": {"bg": "#d03b3b", "text": "#ffffff", "tint": "#fbe4e4"},
     "neutral": {"bg": "#e1e0d9", "text": "#52514e", "tint": "#f2f1ee"},
+    # In-progress pipeline stage (Data Upload status). Reuses the
+    # existing BLUE accent (topbar gradient / active-nav highlight) - not
+    # a new color introduced to the palette.
+    "processing": {"bg": BLUE, "text": "#ffffff", "tint": BLUE_WASH},
 }
 
 # Rounded-grade -> status band. Matches the reference workbook's own
@@ -52,11 +58,11 @@ RISK_BAND_STATUS = {5: "good", 4: "good", 3: "warning", 2: "serious", 1: "critic
 
 _STATUS_TEXT_KIND = {
     "Pass": "good", "PASS": "good", "PASS - ties": "good", "Approve": "good", "MATCH": "good",
-    "GREEN": "good", "Low Risk": "good",
+    "GREEN": "good", "Low Risk": "good", "Compliant": "good",
     "Fail": "critical", "FAIL": "critical", "Reject": "critical", "DISCREPANCY": "critical",
-    "NOT PASS": "critical", "RED": "critical", "High Risk": "critical",
+    "NOT PASS": "critical", "RED": "critical", "High Risk": "critical", "Breach": "critical",
     "FLAG FOR REVIEW": "warning", "CHECK": "warning", "WATCH LIST": "warning",
-    "AMBER": "warning", "Moderate Risk": "warning",
+    "AMBER": "warning", "Moderate Risk": "warning", "Warning / Review Required": "warning",
     "NOT COMPARABLE": "neutral",
 }
 
@@ -191,13 +197,28 @@ def inject_theme():
             color: {SIDEBAR_MUTED};
             margin: 0.4rem 0 0.45rem 0.55rem;
         }}
-        [data-testid="stSidebar"] div[role="radiogroup"] label:nth-of-type(7) {{
+        [data-testid="stSidebar"] div[role="radiogroup"] label:nth-of-type(6) {{
             margin-top: 1rem;
             padding-top: 1rem;
             border-top: 1px solid rgba(255,255,255,0.10);
         }}
-        [data-testid="stSidebar"] div[role="radiogroup"] label:nth-of-type(7)::before {{
+        [data-testid="stSidebar"] div[role="radiogroup"] label:nth-of-type(6)::before {{
             content: "Decisioning & Monitoring";
+            display: block;
+            font-size: 0.66rem;
+            font-weight: 700;
+            letter-spacing: 0.09em;
+            text-transform: uppercase;
+            color: {SIDEBAR_MUTED};
+            margin: 0 0 0.45rem 0.55rem;
+        }}
+        [data-testid="stSidebar"] div[role="radiogroup"] label:nth-of-type(9) {{
+            margin-top: 1rem;
+            padding-top: 1rem;
+            border-top: 1px solid rgba(255,255,255,0.10);
+        }}
+        [data-testid="stSidebar"] div[role="radiogroup"] label:nth-of-type(9)::before {{
+            content: "Additional Features";
             display: block;
             font-size: 0.66rem;
             font-weight: 700;
@@ -533,6 +554,44 @@ def inject_theme():
         div[data-testid="stExpander"] {{
             border: 1px solid {BORDER};
             border-radius: 10px;
+        }}
+
+        /* ---------------- Guided-workflow stage buttons ---------------- */
+        .stButton > button {{
+            border-radius: 8px;
+            font-weight: 700;
+            font-size: 0.88rem;
+            padding: 0.55rem 1.1rem;
+            transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+        }}
+        .stButton > button[kind="primary"] {{
+            background: {BLUE};
+            border: 1px solid {BLUE};
+            color: #ffffff;
+        }}
+        .stButton > button[kind="primary"]:hover {{
+            background: {BLUE_DARK};
+            border-color: {BLUE_DARK};
+            color: #ffffff;
+        }}
+        .stButton > button[kind="primary"]:active {{
+            background: {BLUE_DARK};
+            border-color: {BLUE_DARK};
+        }}
+        .stButton > button[kind="primary"]:disabled {{
+            background: {GRIDLINE};
+            border-color: {GRIDLINE};
+            color: {INK_MUTED};
+        }}
+        .stButton > button[kind="secondary"] {{
+            background: {SURFACE};
+            border: 1px solid {BORDER};
+            color: {INK_SECONDARY};
+        }}
+        .stButton > button[kind="secondary"]:hover {{
+            background: {SURFACE_PAGE};
+            border-color: {INK_MUTED};
+            color: {INK_PRIMARY};
         }}
         </style>
         """,
