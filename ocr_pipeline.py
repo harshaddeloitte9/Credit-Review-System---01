@@ -1,21 +1,17 @@
 """
 PDF -> OCR (LLMWhisperer) -> Financial Data Extraction -> Excel pipeline.
 
-ISOLATED FROM THE CURRENT DEMO FLOW. The application currently loads its
-Tata Steel dataset directly from the business/reference workbook
-(reference_data.py) instead of running this pipeline - see app.py. Nothing
-in app.py imports this module, and nothing here is called during the
-current Financial Analysis / Risk Scoring flow.
-
-This module is kept intact, unmodified in behaviour from the original
-single-file app, for future re-integration once OCR extraction quality is
-revisited. It targets a different workbook (Credit_Review_Tool_Input_Data_
-Template.xlsx, the blank OCR-output template) than the reference workbook
-the rest of the app now reads from (Credit Review Automation Example.xlsx).
-
-Nothing in this module is invoked automatically; run_llmwhisperer() is the
-only function that calls the LLMWhisperer API, and only when a caller
-explicitly invokes it with a PDF path and a configured API key.
+This IS the live PDF-upload pipeline: app.py's Data Upload page calls into
+this module via ocr_upload.process_uploaded_pdf(), which runs
+run_llmwhisperer() (or the curl-transport fallback), then
+extract_financial_values() and populate_workbook() from here, against
+Credit_Review_Tool_Input_Data_Template.xlsx (the blank OCR-output
+template - a different workbook from Credit Review Automation Example.xlsx,
+which supplies only the policy/threshold sheets, '2-Financial Analysis'
+through '9 - Credit Memo'). run_llmwhisperer() is the only function that
+calls the LLMWhisperer API, and only when a caller (ocr_upload.py)
+explicitly invokes it with a PDF path and a configured API key - nothing
+here runs on import.
 """
 
 import csv
@@ -1220,6 +1216,37 @@ MAX_LOOKAHEAD_LINES = 6
 
 LETTERED_ITEM_RE = re.compile(r"(?:^|[|:])\s*[a-zA-Z]\)\s")
 
+# A line that opens its own enumerated sub-item - "(i) ...", "(ii) ...",
+# "(a) ...", "a) ..." - immediately after start-of-line (or a "|"/":"
+# delimiter). Deliberately loose (a bare character-class match, not real
+# roman-numeral validation) - this is only ever used to recognize "this
+# line visibly belongs to some OTHER named row", never to parse the
+# marker's actual value.
+_ENUMERATED_ITEM_MARKER_RE = re.compile(r"(?:^|[|:])\s*\(?(?:[ivxIVX]{1,4}|[a-hA-H])[.)]\s*\S")
+
+
+def _line_is_independent_item(line, aliases):
+    """True if `line` visibly opens its own enumerated sub-item (its own
+    "(i)"/"(ii)"/"(a)"/"(b)"/... marker) for something OTHER than the
+    field currently being searched for. Schedule III/Ind-AS statements
+    routinely place several *different* line items - many with no
+    tracked field of their own at all (Trade Receivables, Bank Balances,
+    Other Current Liabilities, ...) - immediately next to a field's own
+    label, in filings whose table layout puts a row's numbers on a
+    different physical line from its label. line_belongs_to_other_field()
+    only recognizes this app's own tracked fields; without this
+    additional check, an untracked neighbour's numbers could be silently
+    borrowed for a field they do not belong to. A line matching the
+    CURRENT field's own aliases is never excluded this way - the same
+    field's row is always fair game no matter how it is marked."""
+    if not _ENUMERATED_ITEM_MARKER_RE.search(line):
+        return False
+    normalized = _collapse_label_punctuation(normalize_text(line).lower())
+    return not any(
+        _alias_present(normalized, _collapse_label_punctuation(normalize_text(alias).lower()))
+        for alias in aliases
+    )
+
 
 def locate_field(lines, section, aliases):
 
@@ -1240,18 +1267,19 @@ def locate_field(lines, section, aliases):
     best_score = max(s for _, s in scored)
     candidates = [idx for idx, s in scored if s == best_score]
 
-    # A compound line item's lettered sub-components (e.g. "a) Sales/
-    # income from operations") can outscore, by raw alias length, the
-    # explicit "Total <item>" line that follows them in standard
-    # Schedule III/Ind-AS filings - even though that Total line is the
-    # authoritative summary figure, not any one sub-component. If
-    # every current best-scoring candidate is such a lettered
-    # sub-item and a line explicitly marked "Total" also matched this
-    # field's own aliases (at any score), prefer the Total line
-    # instead. Every candidate here already passed a genuine, field-
-    # specific alias match, so this only reorders among already-
-    # relevant lines - it never introduces a new, unrelated match.
-    if all(LETTERED_ITEM_RE.search(lines[idx]) for idx in candidates):
+    # A field's alias can tie across more than one line in standard
+    # Schedule III/Ind-AS filings - a lettered sub-component ("a) Sales/
+    # income from operations"), a same-named sub-line ("(b) Other
+    # current liabilities"), or a bare subheading - against the explicit
+    # "Total <item>" line that is the authoritative summary figure, not
+    # any one sub-component or subheading. Whenever candidates tie and
+    # at least one of them is explicitly marked "Total", prefer that one
+    # - regardless of whether the losing candidates are lettered items,
+    # already carry their own inline numbers, or not. Every candidate
+    # here already passed a genuine, field-specific alias match, so this
+    # only reorders among already-relevant lines - it never introduces a
+    # new, unrelated match.
+    if len(candidates) > 1:
 
         total_marked = [
             idx for idx, _ in scored
@@ -1276,15 +1304,42 @@ def locate_field(lines, section, aliases):
     numeric_idx = best_idx
     tokens = extract_number_tokens(lines[best_idx])
 
-    if len(tokens) < 2:
+    if len(tokens) == 0:
 
-        # The matched line only carries the label (a long item
-        # name wrapped across OCR lines, or a ratio name followed by
-        # its formula description before the figures). Look at the
+        # The matched line carries only the label - either a long item
+        # name wrapped across OCR lines, a ratio name followed by its
+        # formula description before the figures, or (in filings whose
+        # table layout prints a row's numbers on the physical line
+        # ABOVE its label rather than beside/after it) the label of a
+        # row whose own numbers already went by. Look at the
         # surrounding lines for the row's actual numbers, but never
         # cross into a line that is itself another field's labelled
-        # row.
-        offsets = list(range(1, MAX_LOOKAHEAD_LINES + 1)) + [-1]
+        # row, or another row's own labelled data entirely (see
+        # _line_is_independent_item).
+        #
+        # Deliberately NOT triggered when the matched line already
+        # carries ONE number of its own (0 < len(tokens) < 2): that is
+        # a single column genuinely present on this exact row (the
+        # other column blank/absent in the source), not a signal to go
+        # looking elsewhere - borrowing a nearby line's numbers in that
+        # case would silently substitute a DIFFERENT row's figures
+        # rather than correctly reporting the second year as
+        # unavailable. See select_fy_values's own single-token handling.
+        #
+        # -1 (the immediately preceding line) is tried FIRST, ahead of
+        # the forward offsets: in a "numbers-line before label-line"
+        # table (see above), the row's own genuine figures are always
+        # its immediate predecessor, one line away - whereas a forward
+        # match found first could easily be a *different*, closer
+        # untracked row's own numbers (nothing marks them as foreign
+        # the way an enumerated item is marked - see
+        # _line_is_independent_item). The forward-scanning ratio-table
+        # case (formula description lines, each with fewer than 2
+        # tokens, interposed before the real figures) is unaffected: -1
+        # there is either excluded outright or simply lacks 2 tokens of
+        # its own, so the loop falls through to the forward offsets
+        # exactly as before.
+        offsets = [-1] + list(range(1, MAX_LOOKAHEAD_LINES + 1))
 
         for offset in offsets:
 
@@ -1303,6 +1358,9 @@ def locate_field(lines, section, aliases):
             if line_belongs_to_other_field(
                 lines[candidate_idx], current_section_type
             ):
+                continue
+
+            if _line_is_independent_item(lines[candidate_idx], aliases):
                 continue
 
             candidate_tokens = extract_number_tokens(

@@ -39,16 +39,50 @@ def _load_realistic_ocr_text():
     needs (compute_derived_metrics has no None-guard for most P&L lines)
     without ever calling the OCR provider itself. Falls back to a minimal
     stand-in (accepting that downstream metrics may show "not available")
-    if no such artifact exists on this machine."""
+    if no such artifact exists on this machine.
+
+    Specifically the real TATA STEEL filing, not just "whichever cached
+    OCR text happens to be largest" - this machine's shared temp dir can
+    (and, once a second real borrower PDF like Tata Chemicals has been
+    tested here, does) also hold cached OCR text for other companies,
+    some larger than Tata Steel's own. Every candidate is checked for a
+    Tata Steel-specific marker before being accepted, so this function
+    can never silently hand a different company's document to a test
+    whose whole point is exercising the genuine, known-good Tata Steel
+    baseline."""
     candidates = sorted(
         glob.glob(os.path.join(tempfile.gettempdir(), "credit_review_tool_pdf_upload", "raw_ocr_*.txt")),
         key=os.path.getsize, reverse=True,
     )
     for path in candidates:
-        if os.path.getsize(path) > 50_000:
-            with open(path, "r", encoding="utf-8") as f:
-                return f.read()
+        if os.path.getsize(path) <= 50_000:
+            continue
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+        if "tata steel" in text.lower():
+            return text
     return "Revenue from operations FY2026 1,234.56 FY2025 1,100.00\n"
+
+
+def _load_tata_chemicals_ocr_text():
+    """Same mechanism as _load_realistic_ocr_text(), for the genuine Tata
+    Chemicals filing cached on this machine after that document was
+    manually tested through the live app - a real, different-company
+    document (a numbers-line-precedes-label-line P&L/Cash Flow table
+    layout that Tata Steel's own filing does not use), reused here rather
+    than calling the OCR provider again. Returns None if no such cached
+    text exists on this machine (e.g. a different environment) - callers
+    must skip the Tata-Chemicals-specific checks in that case rather than
+    fabricating a stand-in document."""
+    candidates = glob.glob(os.path.join(tempfile.gettempdir(), "credit_review_tool_pdf_upload", "raw_ocr_*.txt"))
+    for path in candidates:
+        if os.path.getsize(path) <= 50_000:
+            continue
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+        if "tata chemicals" in text.lower():
+            return text
+    return None
 
 
 def _ok(cond, msg):

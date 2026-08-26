@@ -43,7 +43,7 @@ from financial_analysis import build_financial_analysis
 from risk_scoring import build_risk_scoring
 from covenants import load_covenant_policy, build_covenants
 from collateral_assessment import load_collateral_inputs, build_collateral_assessment
-from limit_setting import load_limit_setting_policy, build_limit_setting
+from limit_setting import load_limit_setting_policy, build_limit_setting, LimitSettingResult
 from continuous_monitoring import load_monitoring_policy, build_continuous_monitoring
 from portfolio_monitoring import load_portfolio_inputs, build_portfolio_monitoring
 from credit_memo import load_credit_memo_commentary, build_credit_memo
@@ -122,6 +122,27 @@ def generate_workbook_missing_collateral(source_path, dest_path):
     wb.save(dest_path)
 
 
+# '1-Input Data' rows 49-53 (DSCR/ISCR/Current Ratio/Debt-Equity/Debt-Assets,
+# both B and D columns) - the "Reported Ratios" / Regulation 52(4)-style
+# disclosure block. Tata Steel's own filing happens to include it, but nothing
+# requires a genuinely different borrower's filing to - a real, plausible
+# document shape this application must not crash on (see financial_analysis.py /
+# risk_scoring.py / covenants.py / continuous_monitoring.py's None-guards).
+_REPORTED_RATIOS_CELLS = ["B49", "D49", "B50", "D50", "B51", "D51", "B52", "D52", "B53", "D53"]
+
+
+def generate_workbook_missing_reported_ratios(source_path, dest_path):
+    """Blanks the entire Reported Ratios block - everything else (including
+    Debtors/Inventory Turnover Days) intact - to prove Financial Analysis,
+    Risk Scoring, Covenants and Continuous Monitoring all degrade to 'Not
+    Available / Requires Review' rather than crashing on None arithmetic."""
+    wb = load_workbook(source_path, data_only=True)
+    ws = wb["1-Input Data"]
+    for cell in _REPORTED_RATIOS_CELLS:
+        ws[cell] = None
+    wb.save(dest_path)
+
+
 def run_pipeline(workbook_path):
     """Mirrors exactly what app.py does for a given workbook path - no
     calculation logic is re-implemented here, only orchestration."""
@@ -137,7 +158,19 @@ def run_pipeline(workbook_path):
     collateral = build_collateral_assessment(coll_inputs, fa.derived.total_debt.current) if coll_inputs else None
 
     limit_policy = load_limit_setting_policy(bundle.workbook_path)
-    limit_result = build_limit_setting(limit_policy, fa.derived.ebit.current, d.reported_dscr.current)
+    # Same EBIT/reported-DSCR availability guard app.py itself applies
+    # before calling build_limit_setting() (which has no None-guard of its
+    # own) - see AREAS[6] / the Credit Memo page in app.py.
+    if fa.derived.ebit.current is None or d.reported_dscr.current is None:
+        limit_result = LimitSettingResult(
+            annual_instalment=None, schedule=[], implied_existing_debt_service=None,
+            total_proforma_debt_service=None, ebit=None, proforma_dscr=None,
+            proforma_dscr_status="Not available", max_serviceable_debt_service=None,
+            available_additional_debt_service=None, capacity_cap=None,
+            recommended_limit=None, conclusion="Not available",
+        )
+    else:
+        limit_result = build_limit_setting(limit_policy, fa.derived.ebit.current, d.reported_dscr.current)
 
     mon_policy = load_monitoring_policy(bundle.workbook_path)
     rows_by_key = {r.key: r for r in fa.income_statement_rows + fa.ratio_rows}
@@ -198,6 +231,7 @@ def main():
         dataset_b_path = os.path.join(scratch, "dataset_b_synthetic.xlsx")
         broken_path = os.path.join(scratch, "broken_missing_covenants.xlsx")
         no_collateral_path = os.path.join(scratch, "missing_collateral_only.xlsx")
+        no_reported_ratios_path = os.path.join(scratch, "missing_reported_ratios.xlsx")
 
         print("=" * 100)
         print("GENERATING TEST WORKBOOKS (temp files, not committed to the repo)")
@@ -208,6 +242,8 @@ def main():
         print(f"  Broken (missing '4-Covenants') workbook written to {broken_path}")
         generate_workbook_missing_collateral(REFERENCE_WORKBOOK_PATH, no_collateral_path)
         print(f"  Missing-collateral-only workbook written to {no_collateral_path}")
+        generate_workbook_missing_reported_ratios(REFERENCE_WORKBOOK_PATH, no_reported_ratios_path)
+        print(f"  Missing-Reported-Ratios workbook written to {no_reported_ratios_path}")
 
         print()
         print("=" * 100)
@@ -344,6 +380,25 @@ def main():
         report_b = validate_workbook(dataset_b_path)
         all_ok &= (_ok if report_a.is_valid else _fail)(f"Dataset A valid: {report_a.is_valid}, errors={report_a.errors}")
         all_ok &= (_ok if report_b.is_valid else _fail)(f"Dataset B valid: {report_b.is_valid}, errors={report_b.errors}")
+
+        print()
+        print("=" * 100)
+        print("10. GRACEFUL DEGRADATION: a document with no Reported Ratios disclosure at all")
+        print("    (DSCR/ISCR/Current Ratio/Debt-Equity/Debt-Assets) never crashes, never")
+        print("    fabricates a value, never reuses Tata Steel's own reported ratios")
+        print("=" * 100)
+        result_no_ratios = run_pipeline(no_reported_ratios_path)
+        for k in ("dscr", "iscr", "current_ratio", "debt_equity", "risk_score", "risk_grade",
+                  "covenant_overall_status", "covenant_dscr_rag", "covenant_iscr_rag"):
+            all_ok &= (_ok if result_no_ratios[k] is None or "Not Available" in str(result_no_ratios[k]) else _fail)(
+                f"{k} for the missing-Reported-Ratios document = {result_no_ratios[k]!r} "
+                f"(expected None / 'Not Available...', not a crash and not a Tata Steel figure)"
+            )
+        all_ok &= (_ok if result_no_ratios["memo_statuses"][0] == "Approve" or result_no_ratios["memo_statuses"][0] == "Reject" else _fail)(
+            f"Financial Analysis overall status still resolves for the missing-Reported-Ratios "
+            f"document ({result_no_ratios['memo_statuses'][0]}) - the metrics that ARE present "
+            f"(Revenue, Total Assets, Net Profit, etc.) still gate it"
+        )
 
         print()
         print("#" * 100)

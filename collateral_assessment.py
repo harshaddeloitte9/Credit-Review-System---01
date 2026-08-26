@@ -14,10 +14,18 @@ Per-asset-class book values and haircuts (B15:C19) are hardcoded, entity-
 specific numbers in the reference workbook - not formulas, and not
 derivable from '1-Input Data' (which has no Trade Receivables, Investments-
 beyond-current, or Inventory fields at all, and whose Cash/PPE figures do
-not tie exactly to these rounded collateral-schedule numbers either). Per
-the reference-workbook parity rule, these are read as reference values,
-not re-derived - same treatment as Debtors/Inventory Days in Financial
-Analysis.
+not tie exactly to these rounded collateral-schedule numbers either).
+
+These are Tata Steel's OWN collateral schedule, not generic reference/
+policy data - unlike '2-Financial Analysis'!G7:G26 (thresholds) or
+'3-Risk Scoring' weights, there is no sense in which every borrower should
+see the same numbers here. A PDF-uploaded borrower's merged workbook still
+carries this sheet unchanged from the policy workbook (demo_source.py only
+replaces '1-Input Data'), so app.py deliberately does NOT call
+load_collateral_inputs() for a PDF-uploaded borrower (source_mode="pdf") -
+only for Advanced/uploaded-workbook mode, where the analyst supplies a
+complete, independent workbook that may carry its own genuine collateral
+sheet. See app.py's Collateral Assessment page and Credit Memo section.
 
 Formulas reproduced exactly as found in '5-Collateral Assessment':
     Adjusted Value              = Book Value * (1 - Haircut% / 100)   (D15:D19)
@@ -46,6 +54,7 @@ workbook. Reproduced exactly as written for parity.
 """
 
 from dataclasses import dataclass
+from typing import Optional
 
 from openpyxl import load_workbook
 
@@ -77,8 +86,8 @@ class CollateralInputs:
 class CollateralResult:
     assets: list
     total_adjusted_value: float
-    debt_exposure: float
-    coverage_ratio: float
+    debt_exposure: Optional[float]
+    coverage_ratio: Optional[float]
     rating: str
 
 
@@ -125,7 +134,7 @@ def load_collateral_inputs(workbook_path):
     return CollateralInputs(assets_raw=assets_raw, rating_bands=rating_bands, typical_haircuts=typical_haircuts)
 
 
-def build_collateral_assessment(inputs: CollateralInputs, debt_exposure: float) -> CollateralResult:
+def build_collateral_assessment(inputs: CollateralInputs, debt_exposure: Optional[float]) -> CollateralResult:
     assets = []
     total_adjusted = 0.0
     for label, book_value, haircut_pct, liquidity, rank, assessment, relevance in inputs.assets_raw:
@@ -136,6 +145,17 @@ def build_collateral_assessment(inputs: CollateralInputs, debt_exposure: float) 
             liquidity=liquidity, security_rank=rank, assessment=assessment,
             credit_relevance=relevance, adjusted_value=adjusted_value,
         ))
+
+    # debt_exposure (fa.derived.total_debt.current) requires Borrowings
+    # (current & non-current) and Lease Liabilities (current & non-current)
+    # to all be extractable - not guaranteed for every document. Coverage
+    # ratio/rating are not derivable without it - "Not available", not a
+    # divide-by-None crash or a guessed rating.
+    if debt_exposure is None:
+        return CollateralResult(
+            assets=assets, total_adjusted_value=total_adjusted,
+            debt_exposure=None, coverage_ratio=None, rating="Not available",
+        )
 
     coverage_ratio = total_adjusted / debt_exposure
 

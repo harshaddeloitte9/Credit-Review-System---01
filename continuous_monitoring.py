@@ -82,21 +82,38 @@ def load_monitoring_policy(workbook_path) -> MonitoringPolicy:
     )
 
 
+_NOT_AVAILABLE = "Not Available / Requires Review"
+
+
+def _pct_trigger(label, threshold_text, pct_change, ok_fn):
+    # revenue/total-debt %-change come from core P&L/Balance Sheet fields
+    # (virtually always present); dscr %-change depends on the Reported
+    # Ratios disclosure, which is not universal (see financial_analysis.py's
+    # guard on the same field) - None is shown as not-available rather than
+    # crashing on `None > threshold`.
+    if pct_change is None:
+        return MonitoringTrigger(
+            label, threshold_text, None, _NOT_AVAILABLE,
+            note="Not available - this document's disclosures do not support computing this trigger.",
+        )
+    return MonitoringTrigger(label, threshold_text, pct_change, "PASS" if ok_fn(pct_change) else "FAIL")
+
+
 def build_continuous_monitoring(policy: MonitoringPolicy, revenue_pct_change, total_debt_pct_change,
                                  dscr_pct_change, covenant_rag_breach: bool) -> ContinuousMonitoringResult:
     triggers = []
 
-    triggers.append(MonitoringTrigger(
+    triggers.append(_pct_trigger(
         "Revenue decline YoY", f"> {policy.revenue_decline_threshold:.0%}",
-        revenue_pct_change, "PASS" if revenue_pct_change > policy.revenue_decline_threshold else "FAIL",
+        revenue_pct_change, lambda v: v > policy.revenue_decline_threshold,
     ))
-    triggers.append(MonitoringTrigger(
+    triggers.append(_pct_trigger(
         "Total debt increase YoY", f"<= {policy.total_debt_increase_threshold:.0%}",
-        total_debt_pct_change, "PASS" if total_debt_pct_change <= policy.total_debt_increase_threshold else "FAIL",
+        total_debt_pct_change, lambda v: v <= policy.total_debt_increase_threshold,
     ))
-    triggers.append(MonitoringTrigger(
+    triggers.append(_pct_trigger(
         "Reported DSCR deterioration YoY", f"> {policy.dscr_deterioration_threshold:.0%}",
-        dscr_pct_change, "PASS" if dscr_pct_change > policy.dscr_deterioration_threshold else "FAIL",
+        dscr_pct_change, lambda v: v > policy.dscr_deterioration_threshold,
     ))
     triggers.append(MonitoringTrigger(
         "Any covenant on Amber/Red", "0 breaches",

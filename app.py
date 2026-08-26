@@ -374,8 +374,8 @@ if fa is not None and risk is not None:
         d.company_name,
         f"{d.statement_scope} · FY{d.fy_current_year}",
         fa.overall_status,
-        "good" if fa.overall_status == "Approve" else "critical",
-        f"{risk.total_weighted_score:.2f} / 5.00",
+        status_kind(fa.overall_status),
+        f"{risk.total_weighted_score:.2f} / 5.00" if risk.total_weighted_score is not None else "Not Available",
     )
 else:
     st.sidebar.markdown(
@@ -1114,7 +1114,7 @@ elif selected_area == AREAS[2]:
     m = fa.derived
     rows_by_key = {r.key: r for r in fa.income_statement_rows + fa.ratio_rows}
 
-    overall_kind = "good" if fa.overall_status == "Approve" else "critical"
+    overall_kind = status_kind(fa.overall_status)
     st.markdown(
         badge_html(fa.overall_status, overall_kind)
         + f'&nbsp;&nbsp;<span style="color:{INK_MUTED};font-size:0.85rem;">{fa.overall_status_note}</span>',
@@ -1210,12 +1210,15 @@ elif selected_area == AREAS[2]:
         st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
     with col2:
         chart_caption(f"Capital structure — {FY_CURRENT_SHORT}")
-        fig = capital_structure_bar(m.total_debt.current, d.total_equity.current)
-        st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
-        st.caption(
-            "Total Debt vs Total Equity (balance-sheet basis). Differs from the "
-            "disclosure-basis Net Worth card above, which is drawn from the reported figures."
-        )
+        if m.total_debt.current is not None and d.total_equity.current is not None:
+            fig = capital_structure_bar(m.total_debt.current, d.total_equity.current)
+            st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+            st.caption(
+                "Total Debt vs Total Equity (balance-sheet basis). Differs from the "
+                "disclosure-basis Net Worth card above, which is drawn from the reported figures."
+            )
+        else:
+            st.info("Capital structure chart not available - requires both Total Debt and Total Equity.")
 
     # ---- 4. Liquidity & Leverage ----------------------------------
     render_section("Liquidity & Leverage", "Reported Ratios basis")
@@ -1376,7 +1379,7 @@ elif selected_area == AREAS[3]:
 
     render_section("Financial Covenants")
 
-    overall_kind = "good" if covenants.overall_status == "PASS" else "critical"
+    overall_kind = status_kind(covenants.overall_status)
     st.markdown(
         badge_html(covenants.overall_status, overall_kind)
         + f'&nbsp;&nbsp;<span style="color:{INK_MUTED};font-size:0.85rem;">'
@@ -1390,8 +1393,11 @@ elif selected_area == AREAS[3]:
     cov_cards = []
     for row in covenants.rows:
         cov_cards.append(kpi_card_html(
-            row.label.split(",")[0], f"{row.actual:.2f}x",
-            sublabel=f"Min {row.threshold:.2f}x · Headroom {row.headroom * 100:+.0f}%",
+            row.label.split(",")[0], f"{row.actual:.2f}x" if row.actual is not None else "Not Available",
+            sublabel=(
+                f"Min {row.threshold:.2f}x · Headroom {row.headroom * 100:+.0f}%" if row.headroom is not None
+                else f"Min {row.threshold:.2f}x · Not disclosed in this document"
+            ),
             icon="✓" if row.rag == "GREEN" else ("!" if row.rag == "RED" else "•"),
             icon_kind=status_kind(row.rag),
         ))
@@ -1401,8 +1407,8 @@ elif selected_area == AREAS[3]:
         {
             "Covenant": r.label,
             "Threshold": f"{r.threshold:.2f}x",
-            "Actual": f"{r.actual:.2f}x",
-            "Headroom": f"{r.headroom * 100:+.1f}%",
+            "Actual": f"{r.actual:.2f}x" if r.actual is not None else "Not Available",
+            "Headroom": f"{r.headroom * 100:+.1f}%" if r.headroom is not None else "—",
             "RAG Status": r.rag,
         }
         for r in covenants.rows
@@ -1413,6 +1419,8 @@ elif selected_area == AREAS[3]:
         badge_col="RAG Status",
         numeric_cols=["Threshold", "Actual", "Headroom"],
     )
+    if covenants.overall_status_note:
+        st.caption(covenants.overall_status_note)
 
     st.caption(
         "Both covenants are read from Financial Analysis's reported DSCR/ISCR (Reported Ratios "
@@ -1512,10 +1520,19 @@ elif selected_area == AREAS[3]:
             st.caption(f"**{t.label}**: {t.note}")
 
     chart_caption("Trigger value vs threshold (percentage-based triggers)")
+
+    def _pct_or_none(pct_change):
+        return pct_change * 100 if pct_change is not None else None
+
     fig = fy_comparison_bar(
         ["Revenue YoY", "Total Debt YoY", "DSCR YoY"],
-        [cm_rows_by_key["revenue"].pct_change * 100, cm_rows_by_key["total_debt"].pct_change * 100, cm_rows_by_key["dscr"].pct_change * 100],
-        [monitoring_policy.revenue_decline_threshold * 100, monitoring_policy.total_debt_increase_threshold * 100, monitoring_policy.dscr_deterioration_threshold * 100],
+        [
+            _pct_or_none(cm_rows_by_key["revenue"].pct_change),
+            _pct_or_none(cm_rows_by_key["total_debt"].pct_change),
+            _pct_or_none(cm_rows_by_key["dscr"].pct_change),
+        ],
+        [monitoring_policy.revenue_decline_threshold * 100, monitoring_policy.total_debt_increase_threshold * 100,
+         monitoring_policy.dscr_deterioration_threshold * 100],
         "Actual", "Threshold",
         value_fmt="{:+.1f}%", height=320,
     )
@@ -1537,27 +1554,51 @@ elif selected_area == AREAS[4]:
         "class's book value.",
     )
 
-    collateral_inputs = load_collateral_inputs(bundle.workbook_path)
+    # A PDF-uploaded borrower's merged workbook carries '5-Collateral
+    # Assessment' unchanged from the policy workbook (demo_source.py only
+    # replaces '1-Input Data') - so that sheet is never this borrower's own
+    # collateral schedule, only ever the reference workbook's (Tata
+    # Steel's). A financial statement PDF has no collateral/security
+    # valuation data for ANY borrower (that normally comes from a separate
+    # valuation/security document), so real collateral data can only ever
+    # be genuine in Advanced/uploaded-workbook mode, where the analyst
+    # supplies a complete, independent workbook of their own.
+    collateral_inputs = load_collateral_inputs(bundle.workbook_path) if _using_upload else None
 
     if collateral_inputs is None:
         st.markdown(badge_html("Unavailable", "neutral"), unsafe_allow_html=True)
         st.markdown("<br>", unsafe_allow_html=True)
-        st.warning(
-            "**Collateral data unavailable — analyst input required.** This workbook has no "
-            "'5-Collateral Assessment' sheet, or is missing its book value / haircut cells. "
-            "This is not derivable from '1-Input Data' (which has no Trade Receivables, "
-            "Investments-beyond-current, or Inventory fields), so no figures are shown here - "
-            "the reference workbook's (Tata Steel's) collateral values are never substituted "
-            "in as a fallback."
-        )
+        if _using_pdf:
+            st.warning(
+                "**Collateral data unavailable — analyst input required.** A financial statement "
+                "PDF does not contain collateral/security valuation data for any borrower - that "
+                "normally comes from a separate valuation or security document, not the P&L/"
+                "Balance Sheet. This is never derivable from '1-Input Data' either (no Trade "
+                "Receivables, Investments-beyond-current, or Inventory fields), so no figures are "
+                "shown here - the reference workbook's (Tata Steel's) collateral values are never "
+                "substituted in as a stand-in for this or any other PDF-uploaded borrower."
+            )
+        else:
+            st.warning(
+                "**Collateral data unavailable — analyst input required.** This workbook has no "
+                "'5-Collateral Assessment' sheet, or is missing its book value / haircut cells. "
+                "This is not derivable from '1-Input Data' (which has no Trade Receivables, "
+                "Investments-beyond-current, or Inventory fields), so no figures are shown here - "
+                "the reference workbook's (Tata Steel's) collateral values are never substituted "
+                "in as a fallback."
+            )
     else:
         collateral = build_collateral_assessment(collateral_inputs, fa.derived.total_debt.current)
 
         rating_kind = status_kind(collateral.rating)
+        _coverage_text = (
+            f'Coverage ratio {collateral.coverage_ratio:.2f}x (~{collateral.coverage_ratio * 100:.0f}%).'
+            if collateral.coverage_ratio is not None
+            else "Coverage ratio not available - Total Debt could not be computed for this document."
+        )
         st.markdown(
             badge_html(collateral.rating, rating_kind)
-            + f'&nbsp;&nbsp;<span style="color:{INK_MUTED};font-size:0.85rem;">'
-              f'Coverage ratio {collateral.coverage_ratio:.2f}x (~{collateral.coverage_ratio * 100:.0f}%).</span>',
+            + f'&nbsp;&nbsp;<span style="color:{INK_MUTED};font-size:0.85rem;">{_coverage_text}</span>',
             unsafe_allow_html=True,
         )
         st.markdown("<br>", unsafe_allow_html=True)
@@ -1567,8 +1608,11 @@ elif selected_area == AREAS[4]:
                           sublabel="Sum of book value x (1 - haircut%)"),
             kpi_card_html("Assumed Debt Exposure", fmt_money_cr(collateral.debt_exposure),
                           sublabel="= Total Debt, from Input Data (frozen)"),
-            kpi_card_html("Collateral Coverage Ratio", f"{collateral.coverage_ratio:.2f}x",
-                          sublabel="Total Adjusted / Debt Exposure"),
+            kpi_card_html(
+                "Collateral Coverage Ratio",
+                f"{collateral.coverage_ratio:.2f}x" if collateral.coverage_ratio is not None else "Not Available",
+                sublabel="Total Adjusted / Debt Exposure",
+            ),
         ], columns_per_row=3)
 
         render_section("Collateral Schedule", "Book values and haircuts are entity-specific reference data read directly from the active workbook - not derivable from '1-Input Data'.")
@@ -1927,7 +1971,10 @@ elif selected_area == AREAS[7]:
     cm9_cov_policy = load_covenant_policy(bundle.workbook_path)
     cm9_covenants = build_covenants(fa, cm9_cov_policy)
 
-    cm9_coll_inputs = load_collateral_inputs(bundle.workbook_path)
+    # Same PDF-vs-Advanced-mode gate as the Collateral Assessment page
+    # itself (AREAS[4] above) - a PDF-uploaded borrower's collateral sheet
+    # is always Tata Steel's own, never this borrower's.
+    cm9_coll_inputs = load_collateral_inputs(bundle.workbook_path) if _using_upload else None
     cm9_collateral = (
         build_collateral_assessment(cm9_coll_inputs, fa.derived.total_debt.current)
         if cm9_coll_inputs else None
@@ -2038,15 +2085,28 @@ elif selected_area == AREAS[8]:
         "workbook's own methodology, weights and scoring bands.",
     )
 
-    band_kind = RISK_BAND_STATUS[round(risk.total_weighted_score)]
+    _total_available = risk.total_weighted_score is not None
+    band_kind = RISK_BAND_STATUS[round(risk.total_weighted_score)] if _total_available else "neutral"
     grade_by_score = {g["score"]: g for g in bundle.risk_policy.grade_scale}
 
     col1, col2 = st.columns([1, 2])
     with col1:
-        render_grade_card(risk.risk_grade.upper(), f"{risk.total_weighted_score:.2f} / 5.00", band_kind)
+        render_grade_card(
+            risk.risk_grade.upper() if _total_available else risk.risk_grade,
+            f"{risk.total_weighted_score:.2f} / 5.00" if _total_available else "Not Available",
+            band_kind,
+        )
     with col2:
-        fig = score_meter(risk.total_weighted_score)
-        st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+        if _total_available:
+            fig = score_meter(risk.total_weighted_score)
+            st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+        else:
+            st.warning(
+                "**Overall Risk Score unavailable.** Financial Strength (below) requires DSCR, "
+                "ISCR, Current Ratio and Debt-Equity, all from this document's Reported Ratios "
+                "disclosure - this document does not include all four, so no total score is "
+                "computed. Never a fabricated or Tata Steel's score in its place."
+            )
         st.caption(
             "Band shown: 1 (Poor / High Risk) → 5 (Excellent / Very Low Risk), per the reference "
             "workbook's own score-to-grade scale - see the full scale further down this page."
@@ -2056,16 +2116,17 @@ elif selected_area == AREAS[8]:
     render_section("Risk Factor Breakdown", "All 8 components, weight × score = weighted contribution.")
     rows = []
     for comp in risk.components:
-        comp_rounded = round(comp.raw_score)
+        comp_available = comp.raw_score is not None
+        comp_rounded = round(comp.raw_score) if comp_available else None
         comp_kind = RISK_BAND_STATUS.get(comp_rounded, "neutral")
         comp_grade = grade_by_score.get(comp_rounded)
         grade_cell = badge_html(comp_grade["risk_interpretation"] if comp_grade else "—", comp_kind)
         rows.append({
             "Component": comp.label,
             "Weight": f"{comp.weight_pct:.0f}%",
-            "Raw Score": f"{comp.raw_score:.2f}",
-            "Score Bar": progress_bar_html(comp.raw_score, color=STATUS[comp_kind]["bg"]),
-            "Weighted Score": f"{comp.weighted_score:.3f}",
+            "Raw Score": f"{comp.raw_score:.2f}" if comp_available else "Not Available",
+            "Score Bar": progress_bar_html(comp.raw_score, color=STATUS[comp_kind]["bg"]) if comp_available else "—",
+            "Weighted Score": f"{comp.weighted_score:.3f}" if comp.weighted_score is not None else "Not Available",
             "Grade": grade_cell,
             "Source": comp.source,
         })
@@ -2103,28 +2164,44 @@ elif selected_area == AREAS[8]:
         "banded exactly per the reference workbook's scoring rules.",
     )
     fs_rows = []
+    fs_unavailable_labels = []
     for f in risk.financial_strength_inputs:
+        f_available = f.value is not None
+        if not f_available:
+            fs_unavailable_labels.append(f.label)
         fs_rows.append({
             "Metric": f.label,
-            "Actual Value": f"{f.value:.2f}x",
+            "Actual Value": f"{f.value:.2f}x" if f_available else "Not Available",
             "Band Rule": f.band_rule,
-            "Score": f"{f.score}",
+            "Score": f"{f.score}" if f_available else "—",
             "Weight": f"{f.weight:.0%}",
-            "Contribution": f"{f.score * f.weight:.3f}",
+            "Contribution": f"{f.score * f.weight:.3f}" if f_available else "Not Available",
         })
     render_html_table(
         fs_rows,
         columns=["Metric", "Actual Value", "Band Rule", "Score", "Weight", "Contribution"],
         numeric_cols=["Actual Value", "Score", "Weight", "Contribution"],
     )
+    if fs_unavailable_labels:
+        st.caption(
+            f"{', '.join(fs_unavailable_labels)} not disclosed in this document's Reported "
+            f"Ratios block - excluded rather than guessed, which is why Financial Strength is "
+            f"Not Available above."
+        )
     render_kpi_row([
-        kpi_card_html("Financial Strength score", f"{risk.financial_strength_score:.2f} / 5.00",
-                      sublabel="Sum of (component score × weight)"),
+        kpi_card_html(
+            "Financial Strength score",
+            f"{risk.financial_strength_score:.2f} / 5.00" if risk.financial_strength_score is not None else "Not Available",
+            sublabel="Sum of (component score × weight)",
+        ),
     ], columns_per_row=1)
 
     # ---- Risk Grade Scale ---------------------------------------------
     render_section("Risk Grade Scale", "From the reference workbook's own score-to-grade table - not re-derived.")
-    render_grade_scale_cards(bundle.risk_policy.grade_scale, round(risk.total_weighted_score))
+    render_grade_scale_cards(
+        bundle.risk_policy.grade_scale,
+        round(risk.total_weighted_score) if risk.total_weighted_score is not None else None,
+    )
 
     # ---- Analyst / Reference Inputs -------------------------------------
     render_section(

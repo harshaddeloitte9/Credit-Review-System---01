@@ -22,17 +22,20 @@ risk-grade lookup - none of that is hardcoded.
 """
 
 from dataclasses import dataclass
+from typing import Optional
 
 from reference_data import ReferenceBundle
+
+NOT_AVAILABLE = "Not Available / Requires Review"
 
 
 @dataclass(frozen=True)
 class FinancialStrengthInput:
     key: str
     label: str
-    value: float
+    value: Optional[float]
     band_rule: str
-    score: int
+    score: Optional[int]
     weight: float
 
 
@@ -41,8 +44,8 @@ class RiskComponent:
     key: str
     label: str
     weight_pct: float
-    raw_score: float
-    weighted_score: float
+    raw_score: Optional[float]
+    weighted_score: Optional[float]
     basis: str
     source: str
 
@@ -50,9 +53,9 @@ class RiskComponent:
 @dataclass(frozen=True)
 class RiskScoringResult:
     financial_strength_inputs: list
-    financial_strength_score: float
+    financial_strength_score: Optional[float]
     components: list
-    total_weighted_score: float
+    total_weighted_score: Optional[float]
     risk_grade: str
     risk_interpretation: str
     overall_status: str
@@ -135,28 +138,55 @@ def build_risk_scoring(bundle: ReferenceBundle) -> RiskScoringResult:
         "debt_equity": d.reported_debt_equity.current,
     }
 
+    # dscr/iscr/current_ratio/debt_equity are this document's "Reported
+    # Ratios" disclosure - not every filing includes it (see
+    # financial_analysis.py's identical guard on the same four fields).
+    # A missing one makes Financial Strength itself unavailable (nothing
+    # to band), not a fabricated score - propagated below rather than
+    # crashing on band_fn(None).
     fs_inputs = []
+    any_missing = False
     for key, label, band_rule, band_fn in _FINANCIAL_STRENGTH_INPUTS:
         value = ratio_values[key]
-        score = band_fn(value)
         weight = sw[key]
-        fs_inputs.append(FinancialStrengthInput(key, label, value, band_rule, score, weight))
+        if value is None:
+            any_missing = True
+            fs_inputs.append(FinancialStrengthInput(key, label, None, band_rule, None, weight))
+        else:
+            fs_inputs.append(FinancialStrengthInput(key, label, value, band_rule, band_fn(value), weight))
 
-    financial_strength_score = sum(f.score * f.weight for f in fs_inputs)
+    financial_strength_score = None if any_missing else sum(f.score * f.weight for f in fs_inputs)
 
     components = []
     for key, label in _COMPONENT_ORDER:
         weight_pct = policy.component_weights[key]
         if key == "financial_strength":
             raw_score = financial_strength_score
-            basis = "Computed: weighted DSCR/ISCR/Current Ratio/Debt-Equity bands (see above)"
+            if raw_score is not None:
+                basis = "Computed: weighted DSCR/ISCR/Current Ratio/Debt-Equity bands (see above)"
+            else:
+                basis = (
+                    "Not available - this document's Reported Ratios disclosure is missing one "
+                    "or more of DSCR/ISCR/Current Ratio/Debt-Equity"
+                )
             source = "computed from Input Data"
         else:
             raw_score = policy.qualitative_scores[key]
             basis = "Analyst-assigned qualitative score, read from the reference workbook"
             source = "policy input (qualitative - not derived from Input Data)"
-        weighted_score = raw_score * weight_pct / 100
+        weighted_score = (raw_score * weight_pct / 100) if raw_score is not None else None
         components.append(RiskComponent(key, label, weight_pct, raw_score, weighted_score, basis, source))
+
+    if any(comp.weighted_score is None for comp in components):
+        return RiskScoringResult(
+            financial_strength_inputs=fs_inputs,
+            financial_strength_score=None,
+            components=components,
+            total_weighted_score=None,
+            risk_grade=NOT_AVAILABLE,
+            risk_interpretation=NOT_AVAILABLE,
+            overall_status=NOT_AVAILABLE,
+        )
 
     total_weighted_score = sum(comp.weighted_score for comp in components)
 

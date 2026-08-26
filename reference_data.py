@@ -1,7 +1,13 @@
 """
-Loads the Tata Steel reference dataset directly from the business/reference
-workbook ("Credit Review Automation Example.xlsx") so the app can run the
-current demo entirely offline - no PDF upload, no OCR.
+Loads a Credit Review workbook's '1-Input Data' (borrower figures) plus its
+'2-Financial Analysis' / '3-Risk Scoring' policy cells (thresholds, weights,
+qualitative scores, the risk-grade scale) into typed Python objects.
+load_reference_bundle(path=...) takes any workbook path - the policy
+workbook ("Credit Review Automation Example.xlsx") directly for Advanced/
+uploaded-workbook mode, or the current PDF upload's own merged workbook
+(demo_source.build_demo_workbook()'s output, '1-Input Data' replaced with
+this borrower's own OCR-extracted figures) for the normal PDF flow. Nothing
+here is specific to any one borrower or workbook.
 
 Only cells that are genuinely raw inputs in '1-Input Data' (not Excel
 formulas) are read here, plus the policy/assumption cells that '2-Financial

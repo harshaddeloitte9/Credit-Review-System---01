@@ -22,6 +22,28 @@ MARGIN_TIE_TOLERANCE = 0.0005    # B69 / B70 / B71: abs(calculated - reported) <
 RATIO_TIE_TOLERANCE = 0.005      # B72 / B73: abs(calculated - reported) <= 0.005
 
 
+# Every formula below takes raw extracted fields, any of which can
+# legitimately be None for a document whose OCR text doesn't disclose (or
+# this pipeline can't locate) that specific line - a real, common outcome
+# for a genuinely different filing, not just a Tata Steel-shaped one. These
+# three helpers are the ONLY arithmetic used in this module from here on:
+# each returns None (never 0, never a guess) the moment any operand is
+# unavailable, instead of letting `None + float` / `None / float` reach
+# Python and crash the whole app. A None here always means "not
+# derivable from what this document supplied" and must render as
+# "Not Available / Requires Review", never a fabricated number.
+def _add(*values):
+    return sum(values) if all(v is not None for v in values) else None
+
+
+def _sub(a, b):
+    return a - b if a is not None and b is not None else None
+
+
+def _div(a, b):
+    return a / b if a is not None and b not in (None, 0) else None
+
+
 @dataclass(frozen=True)
 class DerivedInputMetrics:
     total_income: YearFigure                  # B7  = B5+B6
@@ -63,37 +85,32 @@ class ValidationCheck:
 
 def compute_derived_metrics(d: ReferenceInputData) -> DerivedInputMetrics:
     total_income = YearFigure(
-        d.revenue.current + d.other_income.current,
-        d.revenue.previous + d.other_income.previous,
+        _add(d.revenue.current, d.other_income.current),
+        _add(d.revenue.previous, d.other_income.previous),
     )
     pbt_before_exceptional = YearFigure(
-        total_income.current - d.total_expenses.current,
-        total_income.previous - d.total_expenses.previous,
+        _sub(total_income.current, d.total_expenses.current),
+        _sub(total_income.previous, d.total_expenses.previous),
     )
     pbt = YearFigure(
-        pbt_before_exceptional.current + d.exceptional_items.current,
-        pbt_before_exceptional.previous + d.exceptional_items.previous,
+        _add(pbt_before_exceptional.current, d.exceptional_items.current),
+        _add(pbt_before_exceptional.previous, d.exceptional_items.previous),
     )
     net_profit = YearFigure(
-        pbt.current - d.total_tax_expense.current,
-        pbt.previous - d.total_tax_expense.previous,
+        _sub(pbt.current, d.total_tax_expense.current),
+        _sub(pbt.previous, d.total_tax_expense.previous),
     )
-    def _sub_or_none(a, b):
-        return a - b if a is not None and b is not None else None
-
     net_finance_charges = YearFigure(
-        _sub_or_none(d.finance_costs.current, d.interest_income.current),
-        _sub_or_none(d.finance_costs.previous, d.interest_income.previous),
+        _sub(d.finance_costs.current, d.interest_income.current),
+        _sub(d.finance_costs.previous, d.interest_income.previous),
     )
     ebitda = YearFigure(
-        pbt_before_exceptional.current + net_finance_charges.current + d.depreciation.current
-        if net_finance_charges.current is not None else None,
-        pbt_before_exceptional.previous + net_finance_charges.previous + d.depreciation.previous
-        if net_finance_charges.previous is not None else None,
+        _add(pbt_before_exceptional.current, net_finance_charges.current, d.depreciation.current),
+        _add(pbt_before_exceptional.previous, net_finance_charges.previous, d.depreciation.previous),
     )
     ebitda_margin = YearFigure(
-        ebitda.current / d.revenue.current if ebitda.current is not None else None,
-        ebitda.previous / d.revenue.previous if ebitda.previous is not None else None,
+        _div(ebitda.current, d.revenue.current),
+        _div(ebitda.previous, d.revenue.previous),
     )
     # Reference workbook row 20 is labelled "EBITDA (company definition...)"
     # but its formula (B20=B12+B17, i.e. PBT-before-exceptional + Net
@@ -101,34 +118,28 @@ def compute_derived_metrics(d: ReferenceInputData) -> DerivedInputMetrics:
     # EBITDA - and DSCR/ISCR downstream are explicitly documented as
     # EBIT-based. Replicated per the formula, not the row label.
     ebit = YearFigure(
-        pbt_before_exceptional.current + net_finance_charges.current
-        if net_finance_charges.current is not None else None,
-        pbt_before_exceptional.previous + net_finance_charges.previous
-        if net_finance_charges.previous is not None else None,
+        _add(pbt_before_exceptional.current, net_finance_charges.current),
+        _add(pbt_before_exceptional.previous, net_finance_charges.previous),
     )
     total_debt = YearFigure(
-        d.borrowings_non_current.current + d.borrowings_current.current
-        + d.lease_liabilities_non_current.current + d.lease_liabilities_current.current,
-        d.borrowings_non_current.previous + d.borrowings_current.previous
-        + d.lease_liabilities_non_current.previous + d.lease_liabilities_current.previous,
+        _add(d.borrowings_non_current.current, d.borrowings_current.current,
+             d.lease_liabilities_non_current.current, d.lease_liabilities_current.current),
+        _add(d.borrowings_non_current.previous, d.borrowings_current.previous,
+             d.lease_liabilities_non_current.previous, d.lease_liabilities_current.previous),
     )
     net_debt = YearFigure(
-        total_debt.current - d.current_investments.current - d.cash.current - d.other_bank_balances.current,
-        total_debt.previous - d.current_investments.previous - d.cash.previous - d.other_bank_balances.previous,
+        _sub(_sub(_sub(total_debt.current, d.current_investments.current), d.cash.current), d.other_bank_balances.current),
+        _sub(_sub(_sub(total_debt.previous, d.current_investments.previous), d.cash.previous), d.other_bank_balances.previous),
     )
-    average_equity_current = (d.total_equity.current + d.total_equity.previous) / 2
+    average_equity_current = _div(_add(d.total_equity.current, d.total_equity.previous), 2)
     # C59 in the reference reconstructs the prior-prior year's closing
     # equity from the FY-previous roll-forward (Equity_open = Equity_close -
     # TCI + Dividends), since only two years of balance-sheet data are
     # captured in Input Data.
-    reconstructed_prior_prior_equity = (
-        d.total_equity.previous + d.dividend_paid.previous - d.total_comprehensive_income.previous
-        if d.total_comprehensive_income.previous is not None else None
+    reconstructed_prior_prior_equity = _sub(
+        _add(d.total_equity.previous, d.dividend_paid.previous), d.total_comprehensive_income.previous
     )
-    average_equity_previous = (
-        (d.total_equity.previous + reconstructed_prior_prior_equity) / 2
-        if reconstructed_prior_prior_equity is not None else None
-    )
+    average_equity_previous = _div(_add(d.total_equity.previous, reconstructed_prior_prior_equity), 2)
     average_equity = YearFigure(average_equity_current, average_equity_previous)
 
     return DerivedInputMetrics(
@@ -148,32 +159,28 @@ def compute_derived_metrics(d: ReferenceInputData) -> DerivedInputMetrics:
 
 def compute_calculated_ratios(d: ReferenceInputData, m: DerivedInputMetrics) -> CalculatedRatios:
     dscr = YearFigure(
-        m.ebit.current / (m.net_finance_charges.current + d.repayment_borrowings.current + d.lease_payment.current)
-        if m.ebit.current is not None and m.net_finance_charges.current is not None else None,
-        m.ebit.previous / (m.net_finance_charges.previous + d.repayment_borrowings.previous + d.lease_payment.previous)
-        if m.ebit.previous is not None and m.net_finance_charges.previous is not None else None,
+        _div(m.ebit.current, _add(m.net_finance_charges.current, d.repayment_borrowings.current, d.lease_payment.current)),
+        _div(m.ebit.previous, _add(m.net_finance_charges.previous, d.repayment_borrowings.previous, d.lease_payment.previous)),
     )
     iscr = YearFigure(
-        m.ebit.current / m.net_finance_charges.current
-        if m.ebit.current is not None and m.net_finance_charges.current is not None else None,
-        m.ebit.previous / m.net_finance_charges.previous
-        if m.ebit.previous is not None and m.net_finance_charges.previous is not None else None,
+        _div(m.ebit.current, m.net_finance_charges.current),
+        _div(m.ebit.previous, m.net_finance_charges.previous),
     )
     current_ratio = YearFigure(
-        d.current_assets.current / (d.current_liabilities.current - d.lease_liabilities_current.current),
-        d.current_assets.previous / (d.current_liabilities.previous - d.lease_liabilities_current.previous),
+        _div(d.current_assets.current, _sub(d.current_liabilities.current, d.lease_liabilities_current.current)),
+        _div(d.current_assets.previous, _sub(d.current_liabilities.previous, d.lease_liabilities_current.previous)),
     )
     debt_equity = YearFigure(
-        m.net_debt.current / m.average_equity.current if m.average_equity.current is not None else None,
-        m.net_debt.previous / m.average_equity.previous if m.average_equity.previous is not None else None,
+        _div(m.net_debt.current, m.average_equity.current),
+        _div(m.net_debt.previous, m.average_equity.previous),
     )
     debt_assets = YearFigure(
-        m.total_debt.current / d.total_assets.current,
-        m.total_debt.previous / d.total_assets.previous,
+        _div(m.total_debt.current, d.total_assets.current),
+        _div(m.total_debt.previous, d.total_assets.previous),
     )
     net_profit_margin = YearFigure(
-        m.net_profit.current / d.revenue.current,
-        m.net_profit.previous / d.revenue.previous,
+        _div(m.net_profit.current, d.revenue.current),
+        _div(m.net_profit.previous, d.revenue.previous),
     )
     net_worth = YearFigure(d.total_equity.current, d.total_equity.previous)
 
@@ -190,7 +197,17 @@ def compute_calculated_ratios(d: ReferenceInputData, m: DerivedInputMetrics) -> 
 
 
 def _pass_fail(cell, label, ok):
+    # `ok` is None when a required operand was itself None (this
+    # document's OCR text didn't disclose/couldn't locate it) - "N/A", not
+    # a guessed PASS or FAIL.
+    if ok is None:
+        return ValidationCheck(cell, label, "N/A - required input not available")
     return ValidationCheck(cell, label, "PASS" if ok else "FAIL")
+
+
+def _within_tolerance(a, b, tol):
+    diff = _sub(a, b)
+    return None if diff is None else abs(diff) <= tol
 
 
 def run_validation_checks(d: ReferenceInputData, m: DerivedInputMetrics) -> list:
@@ -200,27 +217,40 @@ def run_validation_checks(d: ReferenceInputData, m: DerivedInputMetrics) -> list
 
     checks.append(_pass_fail(
         "B63", "P&L internal consistency: derived PBT-before-exceptional vs reported",
-        abs(m.pbt_before_exceptional.current - d.reported_pbt_before_exceptional_current) <= PNL_TIE_TOLERANCE,
+        _within_tolerance(m.pbt_before_exceptional.current, d.reported_pbt_before_exceptional_current, PNL_TIE_TOLERANCE),
     ))
     checks.append(_pass_fail(
         "B64", "P&L internal consistency: derived net profit vs reported",
-        abs(m.net_profit.current - d.reported_net_profit_current) <= PNL_TIE_TOLERANCE,
+        _within_tolerance(m.net_profit.current, d.reported_net_profit_current, PNL_TIE_TOLERANCE),
     ))
+    _bs_identity_diff = _sub(d.total_assets.current, _add(d.total_equity.current, d.total_liabilities.current))
+    _bs_identity_ok = (
+        None if _bs_identity_diff is None or d.total_assets.current is None
+        else abs(_bs_identity_diff) <= BALANCE_SHEET_TOLERANCE_PCT * d.total_assets.current
+    )
     checks.append(_pass_fail(
         "B65", "Balance sheet identity: Assets = Equity + Total liabilities (±1%)",
-        abs(d.total_assets.current - (d.total_equity.current + d.total_liabilities.current))
-        <= BALANCE_SHEET_TOLERANCE_PCT * d.total_assets.current,
+        _bs_identity_ok,
     ))
-    ocf_ok = d.operating_cash_flow.current > 0 and d.operating_cash_flow.previous > 0
-    checks.append(ValidationCheck(
-        "B66", "Operating cash flow positive in both years",
-        "PASS" if ocf_ok else "FLAG FOR REVIEW",
-    ))
+    if d.operating_cash_flow.current is None or d.operating_cash_flow.previous is None:
+        checks.append(ValidationCheck(
+            "B66", "Operating cash flow positive in both years",
+            "N/A - required input not available",
+        ))
+    else:
+        ocf_ok = d.operating_cash_flow.current > 0 and d.operating_cash_flow.previous > 0
+        checks.append(ValidationCheck(
+            "B66", "Operating cash flow positive in both years",
+            "PASS" if ocf_ok else "FLAG FOR REVIEW",
+        ))
 
     c = compute_calculated_ratios(d, m)
 
     def tie(cell, label, calc, reported, tol):
-        if calc is None:
+        # `reported` is this document's own Reported Ratios disclosure -
+        # not every filing includes it (Debt/Assets, Debt-Equity, etc.),
+        # same as `calc` being unavailable when a raw component is missing.
+        if calc is None or reported is None:
             checks.append(ValidationCheck(cell, label, "N/A - required input not available"))
             return
         checks.append(ValidationCheck(

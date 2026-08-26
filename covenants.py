@@ -20,11 +20,13 @@ Formulas reproduced exactly as found in '4-Covenants':
     Overall   = "PASS" unless any covenant is AMBER or RED         (E14)
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Optional
 
 from openpyxl import load_workbook
 
 COVENANTS_SHEET = "4-Covenants"
+NOT_AVAILABLE = "Not Available / Requires Review"
 
 
 @dataclass(frozen=True)
@@ -37,8 +39,8 @@ class CovenantPolicy:
 class CovenantRow:
     label: str
     threshold: float
-    actual: float
-    headroom: float
+    actual: Optional[float]
+    headroom: Optional[float]
     rag: str
 
 
@@ -46,6 +48,7 @@ class CovenantRow:
 class CovenantsResult:
     rows: list
     overall_status: str
+    overall_status_note: str = field(default="")
 
 
 def load_covenant_policy(workbook_path) -> CovenantPolicy:
@@ -65,23 +68,41 @@ def _rag(headroom):
     return "RED"
 
 
+def _covenant_row(label, threshold, actual):
+    # DSCR/ISCR (reported basis) are this document's "Reported Ratios"
+    # disclosure - not every filing includes it (see
+    # financial_analysis.py's identical guard). A covenant that cannot be
+    # evaluated shows as such rather than crashing on (None - threshold).
+    if actual is None:
+        return CovenantRow(label, threshold, None, None, NOT_AVAILABLE)
+    headroom = (actual - threshold) / threshold
+    return CovenantRow(label, threshold, actual, headroom, _rag(headroom))
+
+
 def build_covenants(fa, policy: CovenantPolicy) -> CovenantsResult:
     rows_by_key = {r.key: r for r in fa.ratio_rows}
     dscr_actual = rows_by_key["dscr"].current
     iscr_actual = rows_by_key["iscr"].current
 
-    dscr_headroom = (dscr_actual - policy.dscr_minimum) / policy.dscr_minimum
-    iscr_headroom = (iscr_actual - policy.iscr_minimum) / policy.iscr_minimum
-
     rows = [
-        CovenantRow("DSCR, reported basis (minimum)", policy.dscr_minimum, dscr_actual,
-                    dscr_headroom, _rag(dscr_headroom)),
-        CovenantRow("ISCR, reported basis (minimum)", policy.iscr_minimum, iscr_actual,
-                    iscr_headroom, _rag(iscr_headroom)),
+        _covenant_row("DSCR, reported basis (minimum)", policy.dscr_minimum, dscr_actual),
+        _covenant_row("ISCR, reported basis (minimum)", policy.iscr_minimum, iscr_actual),
     ]
 
-    # '4-Covenants'!E14: PASS unless any covenant is AMBER or RED
-    breach = any(r.rag in ("AMBER", "RED") for r in rows)
-    overall_status = "NOT PASS" if breach else "PASS"
+    evaluable_rows = [r for r in rows if r.rag != NOT_AVAILABLE]
+    unavailable_labels = [r.label.split(",")[0] for r in rows if r.rag == NOT_AVAILABLE]
 
-    return CovenantsResult(rows=rows, overall_status=overall_status)
+    if not evaluable_rows:
+        overall_status = NOT_AVAILABLE
+        note = "Neither covenant could be evaluated - this document's Reported Ratios disclosure includes neither DSCR nor ISCR."
+    else:
+        # '4-Covenants'!E14: PASS unless any (evaluable) covenant is AMBER or RED
+        breach = any(r.rag in ("AMBER", "RED") for r in evaluable_rows)
+        overall_status = "NOT PASS" if breach else "PASS"
+        note = (
+            f"{' and '.join(unavailable_labels)} could not be evaluated (not disclosed in this "
+            f"document) and is excluded from this status rather than assumed compliant."
+            if unavailable_labels else ""
+        )
+
+    return CovenantsResult(rows=rows, overall_status=overall_status, overall_status_note=note)
