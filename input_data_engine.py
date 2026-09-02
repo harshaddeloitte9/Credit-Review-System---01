@@ -210,6 +210,100 @@ def _within_tolerance(a, b, tol):
     return None if diff is None else abs(diff) <= tol
 
 
+# ============================================================
+# DATA COMPLETENESS
+#
+# The "Input & Validation" page used to show a hardcoded "100% - All
+# required fields loaded" KPI regardless of what this document's own OCR
+# text actually disclosed - the completeness/false-100% audit's central
+# finding. This replaces it with a genuine count: which of this
+# application's downstream-critical fields are actually present in `d`
+# (from wherever it came - live OCR extraction or the reference
+# workbook), split into the two tiers the audit calls for.
+#
+# CRITICAL_FIELDS are the ones Financial Analysis's own Approve/Reject
+# gate (see financial_analysis.py) treats as required for the decision,
+# plus the handful of raw Balance Sheet fields every one of this
+# application's modules (Financial Analysis, Covenant Monitoring,
+# Collateral Assessment, Limit Setting, Risk Scoring) reads directly.
+# IMPORTANT_FIELDS still feed real calculations (EBITDA margin, net
+# finance charges, net debt) but a document missing one of them still
+# yields a usable - if narrower - analysis, not a blocked decision.
+# ============================================================
+
+@dataclass(frozen=True)
+class FieldCompleteness:
+    label: str
+    tier: str          # "critical" or "important"
+    available: bool
+
+
+@dataclass(frozen=True)
+class DataCompletenessResult:
+    fields: list
+    critical_available: int
+    critical_total: int
+    important_available: int
+    important_total: int
+    overall_pct: float          # weighted: critical fields count double
+    missing_critical: list
+    missing_important: list
+
+
+# Weight applied to a critical field's contribution to overall_pct,
+# relative to an important field's weight of 1 - a document missing a
+# critical figure should visibly cost more completeness than one missing
+# a supplementary line, not be averaged away against 13 other present
+# fields.
+_CRITICAL_WEIGHT = 2
+
+
+def compute_data_completeness(d: ReferenceInputData, m: DerivedInputMetrics) -> DataCompletenessResult:
+
+    critical_checks = [
+        ("Revenue", d.revenue.current is not None),
+        ("Total Income", m.total_income.current is not None),
+        ("Net Profit", m.net_profit.current is not None),
+        ("Total Assets", d.total_assets.current is not None),
+        ("Total Equity", d.total_equity.current is not None),
+        ("Total Debt / Borrowings", m.total_debt.current is not None),
+        ("Current Assets", d.current_assets.current is not None),
+        ("Current Liabilities", d.current_liabilities.current is not None),
+        ("Operating Cash Flow", d.operating_cash_flow.current is not None),
+    ]
+
+    important_checks = [
+        ("Finance Costs", d.finance_costs.current is not None),
+        ("Depreciation", d.depreciation.current is not None),
+        ("Other Income", d.other_income.current is not None),
+        ("Cash", d.cash.current is not None),
+        ("Current Investments", d.current_investments.current is not None),
+    ]
+
+    fields = (
+        [FieldCompleteness(label, "critical", ok) for label, ok in critical_checks]
+        + [FieldCompleteness(label, "important", ok) for label, ok in important_checks]
+    )
+
+    critical_available = sum(1 for _, ok in critical_checks if ok)
+    important_available = sum(1 for _, ok in important_checks if ok)
+
+    weighted_available = _CRITICAL_WEIGHT * critical_available + important_available
+    weighted_total = _CRITICAL_WEIGHT * len(critical_checks) + len(important_checks)
+    overall_pct = (weighted_available / weighted_total) * 100 if weighted_total else 0.0
+
+    return DataCompletenessResult(
+        fields=fields,
+        critical_available=critical_available,
+        critical_total=len(critical_checks),
+        important_available=important_available,
+        important_total=len(important_checks),
+        overall_pct=overall_pct,
+        missing_critical=[label for label, ok in critical_checks if not ok],
+        missing_important=[label for label, ok in important_checks if not ok],
+    )
+
+
 def run_validation_checks(d: ReferenceInputData, m: DerivedInputMetrics) -> list:
     """Replicates '1-Input Data' rows 62-73 exactly - the nine checks that
     exist in the reference workbook. No additional checks are invented."""

@@ -64,6 +64,16 @@ _STATUS_TEXT_KIND = {
     "FLAG FOR REVIEW": "warning", "CHECK": "warning", "WATCH LIST": "warning",
     "AMBER": "warning", "Moderate Risk": "warning", "Warning / Review Required": "warning",
     "NOT COMPARABLE": "neutral",
+    # AI-assisted validation (Phase 2B) - content-judgment statuses.
+    "CONFIRMED": "good", "YEAR_MISMATCH": "warning", "FIELD_MISMATCH": "critical",
+    "VALUE_SUSPICIOUS": "warning", "NOT_FOUND_IN_SOURCE": "neutral",
+    "INSUFFICIENT_CONTEXT": "neutral",
+    # AI-assisted validation (Phase 2B) - technical/execution statuses.
+    "AI_COMPLETED": "good", "AI_SKIPPED": "neutral", "AI_UNAVAILABLE": "neutral",
+    "AI_ERROR": "critical",
+    # AI correction proposals (Phase 3A) - content statuses.
+    "PROPOSAL_AVAILABLE": "warning", "PROPOSAL_UNVERIFIED": "neutral",
+    "PROPOSAL_REJECTED_BY_EVIDENCE": "critical", "NO_PROPOSAL": "neutral",
 }
 
 

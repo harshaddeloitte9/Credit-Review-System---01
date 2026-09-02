@@ -394,10 +394,22 @@ def main():
                 f"{k} for the missing-Reported-Ratios document = {result_no_ratios[k]!r} "
                 f"(expected None / 'Not Available...', not a crash and not a Tata Steel figure)"
             )
-        all_ok &= (_ok if result_no_ratios["memo_statuses"][0] == "Approve" or result_no_ratios["memo_statuses"][0] == "Reject" else _fail)(
-            f"Financial Analysis overall status still resolves for the missing-Reported-Ratios "
-            f"document ({result_no_ratios['memo_statuses'][0]}) - the metrics that ARE present "
-            f"(Revenue, Total Assets, Net Profit, etc.) still gate it"
+        # Corrected expectation (Phase 1 extraction/completeness audit,
+        # financial_analysis.py's build_financial_analysis): DSCR, ISCR,
+        # Current Ratio and Debt-Equity are each one of the metrics this
+        # application treats as REQUIRED for the Approve/Reject decision
+        # (see CRITICAL_WEIGHT / _mark() there) - a document missing all
+        # four must never resolve to Approve or Reject just because
+        # Revenue/Total Assets/Net Profit/OCF still happen to be present.
+        # This used to assert the opposite (Approve/Reject "still gate
+        # it") - that was the false-completeness bug this audit exists to
+        # fix, not a real requirement, so the assertion is corrected here
+        # rather than preserved.
+        all_ok &= (_ok if result_no_ratios["memo_statuses"][0] == "Not Available / Requires Review" else _fail)(
+            f"Financial Analysis overall status is 'Not Available / Requires Review' for the "
+            f"missing-Reported-Ratios document ({result_no_ratios['memo_statuses'][0]}) - DSCR/ISCR/"
+            f"Current Ratio/Debt-Equity are all required for the decision, so Approve/Reject is "
+            f"withheld even though Revenue/Total Assets/Net Profit/OCF are present"
         )
 
         print()

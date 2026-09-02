@@ -372,6 +372,12 @@ ALIASES = {
         "total exceptional items",
         "exceptional items (net)",
         "exceptional items",
+        # Singular form - some filings label this line item "Exceptional
+        # item" (no trailing "s"), e.g. "4 Exceptional item (note 3(a))".
+        # NOT the bare word "exceptional item" - that also occurs inside
+        # "Profit before exceptional item and tax" (a different field's own
+        # row label in the very same statement) and would tie with it.
+        "exceptional item (note",
     ],
 
     "Profit before tax": [
@@ -484,6 +490,16 @@ ALIASES = {
         "net cash from/(used in) operating activities",
         "net cash from / (used in) operating activities",
         "cash from operating activities",
+        # Alternate phrasing seen in other filings' indirect-method cash
+        # flow statements ("generated from"/"generated from/(used in)"
+        # rather than "from") for the same line - the final net operating
+        # total, not the earlier "Cash generated from operationS"
+        # subtotal further up the same statement (deliberately distinct:
+        # "operating activities", not "operations").
+        "net cash flows generated from operating activities",
+        "net cash flow generated from operating activities",
+        "net cash generated from operating activities",
+        "net cash flows generated from/(used in) operating activities",
     ],
 
     "Income taxes paid": [
@@ -506,6 +522,10 @@ ALIASES = {
         "principal payment of lease liabilities",
         "principal payment of lease liability",
         "principal payment of lease",
+        # Alternate phrasing for the same cash-flow line ("repayment
+        # towards" rather than "principal payment of").
+        "repayment towards lease liabilities",
+        "repayment of lease liabilities",
     ],
 
     "Capex": [
@@ -571,14 +591,24 @@ ALIASES = {
         "net worth",
     ],
 
+    # "(in days)" is required, not optional: this field's row/template
+    # cell is specifically the days-of-turnover figure, and at least one
+    # real filing (Tata Chemicals) discloses the SAME-NAMED ratio in a
+    # fundamentally different unit instead - "Inventory turnover ratio
+    # (no. of times)" - a genuine turnover MULTIPLE, not a day-count (the
+    # two are related by ~365/x but are not interchangeable numbers). A
+    # bare "inventory/debtors turnover ratio" fallback would silently
+    # match that "(no. of times)" row and write its multiple into a field
+    # the rest of this application treats as a day-count - exactly the
+    # "field exists but means something else" mismatch the extraction
+    # audit requires this pipeline to catch rather than accept.
     "Debtors turnover": [
         "debtors turnover ratio (in days)",
-        "debtors turnover ratio",
+        "trade receivables turnover ratio (in days)",
     ],
 
     "Inventory turnover": [
         "inventory turnover ratio (in days)",
-        "inventory turnover ratio",
     ],
 }
 
@@ -632,22 +662,80 @@ ALL_ALIASES_FLAT = sorted(
 # of the Standalone one the template asks for (see A1 title).
 # ============================================================
 
+# Every alternative below is anchored on \b before "statement"/"balance"/
+# etc. - without it, "financial results for the" and (worse)
+# "statement of...financial results" match INSIDE ordinary auditor's-report
+# prose that happens to contain the word "misstatement" ("...risks of
+# material misstatement of the standalone annual financial results...").
+# That real, confirmed defect (found via the Tata Chemicals filing, whose
+# audit opinion repeats that sentence for both Consolidated and Standalone)
+# makes find_statement_sections() anchor a "PNL section" on a paragraph of
+# pure boilerplate with zero data rows, starting BEFORE the genuine
+# "Statement of Standalone Audited Financial Results..." heading - so
+# pick_section()'s "first standalone match" picks the boilerplate instead
+# of the real table, and every P&L field in it reports NOT FOUND even
+# though the data is sitting right there a few lines later. "statement" is
+# a real word-boundary-safe token ("misstatement" has no boundary between
+# "mis" and "statement"), so \bstatement\b fixes this with no loss of any
+# genuine heading match.
+#
+# The RATIO pattern's bare "regulation\s*52" alternative has the same
+# shape of bug: an auditor's-report sentence merely citing "Regulation 33
+# and Regulation 52(4) read with Regulation 63 of the Listing Regulations"
+# (routine boilerplate, appearing several times before any real data table)
+# matches it just as well as the genuine disclosure heading
+# ("...pursuant to Regulation 52(4) of the Securities and Exchange Board of
+# India..."). Requiring "pursuant to" immediately before "regulation 52"
+# rules out that boilerplate shape, but is not enough on its own: the P&L
+# page's own closing footer line ("See annexed segment information,
+# balance sheet, cash flows, additional information pursuant to Regulation
+# 52(4) AND ACCOMPANYING NOTES to the standalone audited financial
+# results") also says "pursuant to Regulation 52(4)" - a mere cross-
+# reference, not the disclosure table's own heading, and (being the P&L
+# page's own footer) sorts BEFORE the genuine table too. What every real
+# heading actually says next, confirmed word-for-word in both the Tata
+# Steel and Tata Chemicals filings, is "...Regulation 52(4) OF [the]
+# Securities [and] Exchange Board of India..." - the footer cross-
+# reference says "and accompanying notes" instead. Requiring "of" right
+# after "52(4)" keeps the genuine heading while excluding both false
+# shapes.
 SECTION_HEADING_PATTERNS = {
     "PNL": re.compile(
-        r"financial results for the|statement of profit and loss|"
-        r"statement of.*financial results",
+        r"financial results for the|\bstatement of profit and loss\b|"
+        r"\bstatement of\b.*\bfinancial results\b",
         re.I,
     ),
     "BS": re.compile(
-        r"statement of assets and liabilities|balance sheet as at",
+        r"\bstatement of assets and liabilities\b|\bbalance sheet as at\b",
         re.I,
     ),
     "CF": re.compile(
-        r"statement of cash flows?|cash flow statement",
+        r"\bstatement of cash flows?\b|\bcash flow statement\b",
         re.I,
     ),
     "RATIO": re.compile(
-        r"regulation\s*52|reported ratios|disclosures pursuant",
+        r"pursuant to regulation\s*52\s*(?:\(4\))?\s+of\b|\breported ratios\b|\bdisclosures pursuant\b",
+        re.I,
+    ),
+    # Not one of this pipeline's own four tracked statement types - no
+    # field's FIELD_SECTION is ever "SEGMENT", so pick_section() is never
+    # asked for one and this heading is never itself chosen as a field's
+    # search section. Its only job is to end whichever PNL section
+    # precedes it: the segment-wise breakdown that follows a Reg 52(4)
+    # filing's headline P&L has no section heading of its own that this
+    # pipeline's other patterns recognise, so without this entry
+    # _merge_adjacent_same_heading() silently absorbs the entire
+    # segment-wise table into the same PNL section as the real P&L (its
+    # own heading only reads "...Revenue, Results, Assets and
+    # Liabilities", matching none of the PNL/BS/CF/RATIO patterns above).
+    # In this filing the segment-wise "Total revenue from operations" /
+    # "Total profit before tax" happen to tie to the headline P&L figures
+    # (segments reconcile to the same total by definition) so today's
+    # extraction isn't wrong - but relying on that coincidence for every
+    # field a future filing might name similarly is exactly the
+    # cross-table contamination risk the extraction audit warns against.
+    "SEGMENT": re.compile(
+        r"segment\s*-?\s*wise\s+revenue",
         re.I,
     ),
 }
@@ -664,6 +752,20 @@ def find_statement_sections(lines):
 
     headings = []
 
+    # Carries the last EXPLICITLY marked scope forward to the next heading
+    # whose own +-1-line window mentions neither word - a real, confirmed
+    # shape in these filings: a Reg 52(4) "Additional information pursuant
+    # to Regulation 52(4)..." block that continues the Consolidated report
+    # several pages after the "Consolidated Statement of Cash Flows"
+    # heading, without repeating the word "Consolidated" in its own
+    # heading line. Defaulting an unmarked heading straight to "standalone"
+    # (the old behaviour) mislabels that block as standalone, risking a
+    # Consolidated figure being read into a field the template asks for on
+    # a Standalone basis. Only the very first heading in the document, if
+    # it precedes any explicit marker at all, falls back to "standalone" -
+    # there is no prior scope to inherit at that point.
+    running_scope = None
+
     for idx, line in enumerate(lines):
 
         for section_type, pattern in SECTION_HEADING_PATTERNS.items():
@@ -678,9 +780,17 @@ def find_statement_sections(lines):
                     CONSOLIDATED_MARK.search(window)
                     and not STANDALONE_MARK.search(window)
                 ):
-                    scope = "consolidated"
-                else:
-                    scope = "standalone"
+                    running_scope = "consolidated"
+                elif (
+                    STANDALONE_MARK.search(window)
+                    and not CONSOLIDATED_MARK.search(window)
+                ):
+                    running_scope = "standalone"
+                # else: window mentions neither (or ambiguously mentions
+                # both) - keep whatever scope was last explicitly seen
+                # instead of guessing.
+
+                scope = running_scope or "standalone"
 
                 headings.append(
                     {
@@ -716,6 +826,39 @@ def find_statement_sections(lines):
     return sections
 
 
+def _merge_adjacent_same_heading(sections, chosen):
+    """A real table can contain its own internal sub-heading that also
+    matches SECTION_HEADING_PATTERNS - e.g. a Profit & Loss statement's own
+    Other Comprehensive Income note re-mentions "...the Statement of
+    Profit and Loss", opening a second PNL-type heading immediately after
+    the main Income statement block (confirmed in the Tata Chemicals
+    filing: "Total comprehensive income for the period" sits in this
+    second, OCI-continuation chunk). find_statement_sections() correctly
+    reports these as two separate same-type/same-scope sections back to
+    back, but they are really one continuous table - without this,
+    pick_section() would return only the first chunk and any field whose
+    row happens to fall in the second (like Total comprehensive income
+    here) would wrongly report NOT FOUND despite being a few lines away.
+    sections tile the document with no gaps (each one's "end" is exactly
+    the next heading's "start"), so "immediately following in the list"
+    already means "immediately following in the document" - extending
+    forward through every following section that shares this one's type
+    and scope reunites the table without touching a genuinely distinct,
+    non-adjacent recurrence of the same heading text much later on."""
+    end = chosen["end"]
+    idx = sections.index(chosen)
+    for nxt in sections[idx + 1:]:
+        if nxt["type"] == chosen["type"] and nxt["scope"] == chosen["scope"] and nxt["start"] == end:
+            end = nxt["end"]
+        else:
+            break
+    if end == chosen["end"]:
+        return chosen
+    merged = dict(chosen)
+    merged["end"] = end
+    return merged
+
+
 def pick_section(sections, section_type):
 
     matches = [
@@ -729,10 +872,9 @@ def pick_section(sections, section_type):
         s for s in matches if s["scope"] == "standalone"
     ]
 
-    if standalone_matches:
-        return standalone_matches[0]
+    chosen = standalone_matches[0] if standalone_matches else matches[0]
 
-    return matches[0]
+    return _merge_adjacent_same_heading(sections, chosen)
 
 
 # ============================================================
@@ -796,50 +938,235 @@ def find_bs_subsections(lines, section):
     return subsections
 
 
+# A line consisting only of plausible 4-digit calendar years (e.g.
+# "2026    2025    2025    2026    2025"), used as a fallback header
+# detector below when no single line carries a full "31.03.2026"-style
+# date token - some filings (confirmed: Tata Chemicals) print the header's
+# day/month/year on three separate lines ("31" / "March," / "2026")
+# instead of Tata Steel's single-line "31.03.2026" style, so
+# DATE_TOKEN_RE never matches anything in that header at all. Restricted
+# to a realistic year range so this can't misfire on an unrelated line
+# that happens to contain a 4-digit money figure.
+_BARE_YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
+
+
+def _find_bare_year_header(lines, start, window_end):
+    """Fallback for a header whose day/month/year are split across
+    separate lines: finds a line within the window whose numeric tokens
+    are ALL plausible years (so it can only be a header/date row, never a
+    row of financial figures), and returns each year with its character
+    offset in left-to-right order. Returns None if no such line exists in
+    the window."""
+
+    for i in range(start, window_end):
+
+        line = lines[i]
+        year_matches = list(_BARE_YEAR_RE.finditer(line))
+
+        if len(year_matches) < 2:
+            continue
+
+        # Every OTHER number-like token on the line must itself be one of
+        # the matched years - a line mixing a real year with an unrelated
+        # figure (e.g. a money amount that happens to start with 20) is
+        # not a pure year-header row and is skipped rather than guessed.
+        all_tokens = list(re.finditer(r"\d[\d,]*", line))
+        year_spans = {(m.start(), m.end()) for m in year_matches}
+        if not all(
+            (m.start(), m.end()) in year_spans for m in all_tokens
+        ):
+            continue
+
+        return i, year_matches
+
+    return None
+
+
 def detect_header_periods(lines, start, end):
 
     window_end = min(end, start + 20)
 
-    best_line_idx = None
-    best_matches = []
+    # Every offset this function returns must live in the SAME coordinate
+    # system calibrate_columns_from_data() / locate_field() use for data
+    # rows - i.e. AFTER the OCR line-number prefix ("0x48D: ") is
+    # stripped, not before. Skipping this here would both misalign every
+    # header-based column offset against the data-row ones by exactly the
+    # prefix's length, and (for _find_bare_year_header below) let the
+    # prefix's own digits ("0", "48" out of "0x48D:") count as "other
+    # numeric tokens" on the line, which always fails that function's
+    # all-tokens-are-years check and made it never fire at all.
+    stripped = [strip_line_number_prefix_layout(lines[i]) for i in range(start, window_end)]
+
+    # A Reg 52(4)-style filing's header routinely splits its quarterly and
+    # annual date columns across TWO physical lines (confirmed, real case:
+    # Tata Steel's own P&L header prints "on 31.03.2026  on 31.12.2025  on
+    # 31.03.2025" on one line and the two annual "31.03.2026  31.03.2025"
+    # dates on the very next one) - taking only the single line with the
+    # MOST matches (the old behaviour) silently drops whichever line has
+    # fewer, which is exactly the annual pair resolve_year_columns() needs
+    # to match against the template's target years. Collecting every
+    # qualifying line's dates - each keeping its OWN line's character
+    # offset, since both lines share the same left-hand label-column width
+    # and only differ in which columns are printed - reunites them without
+    # requiring the two halves to already be on one line.
+    first_line_idx = None
+    dates = []
 
     for i in range(start, window_end):
 
-        matches = list(DATE_TOKEN_RE.finditer(lines[i]))
+        matches = list(DATE_TOKEN_RE.finditer(stripped[i - start]))
 
-        if len(matches) >= 2 and len(matches) > len(best_matches):
-            best_matches = matches
-            best_line_idx = i
+        if len(matches) < 2:
+            continue
 
-    if not best_matches:
+        if first_line_idx is None:
+            first_line_idx = i
+
+        for m in matches:
+
+            day, month, year = m.groups()
+            year = int(year)
+
+            if year < 100:
+                year += 2000
+
+            dates.append(
+                {
+                    "day": int(day),
+                    "month": int(month),
+                    "year": year,
+                    "offset": m.start(),
+                }
+            )
+
+    if dates:
+
+        return {
+            "line_idx": first_line_idx,
+            "dates": dates,
+            "count": len(dates),
+        }
+
+    # Fallback: a header whose day/month/year are printed on separate
+    # lines (no single line matches DATE_TOKEN_RE at all).
+    bare = _find_bare_year_header(stripped, 0, len(stripped))
+
+    if not bare:
         return None
 
-    dates = []
+    line_idx, year_matches = bare
+    line_idx += start
 
-    for m in best_matches:
-
-        day, month, year = m.groups()
-        year = int(year)
-
-        if year < 100:
-            year += 2000
-
-        dates.append(
-            {
-                "day": int(day),
-                "month": int(month),
-                "year": year,
-            }
-        )
+    dates = [
+        {"day": None, "month": None, "year": int(m.group()), "offset": m.start()}
+        for m in year_matches
+    ]
 
     return {
-        "line_idx": best_line_idx,
+        "line_idx": line_idx,
         "dates": dates,
         "count": len(dates),
     }
 
 
 # ============================================================
+# YEAR-COLUMN ALIGNMENT
+#
+# Deciding which of a data row's numbers is the FY-current figure and
+# which is FY-previous must not rest on "the last token is always
+# FY-current, the second-to-last is always FY-previous" as a bare
+# positional assumption - the very failure mode Step 4 of the extraction
+# audit calls out. These two functions instead calibrate each section's
+# actual current-year/previous-year column positions (character offset
+# in the layout-preserving OCR text) so a row can be checked against - or,
+# when it carries only one visible figure, resolved by - where its own
+# numbers actually sit, not by array position alone.
+# ============================================================
+
+def resolve_year_columns(header_info, target_current_year, target_previous_year):
+    """Matches the header's own detected year tokens (detect_header_periods)
+    against the two fiscal years the template itself asks for
+    (get_target_fy), and returns (current_x, previous_x) - the character
+    offsets of the FY-current and FY-previous columns - or (None, None) if
+    the header wasn't found or doesn't contain both target years.
+
+    A header can repeat each year more than once (the standard Reg 52(4)
+    layout prints Quarter-current/Quarter-prior-quarter/Quarter-year-ago/
+    Year-current/Year-previous, so e.g. 2026 appears twice and 2025 three
+    times) - the LAST (rightmost) occurrence of each target year is used,
+    since the annual "Year ended"/"FY" columns are always the rightmost
+    pair in every filing inspected (Tata Steel, Tata Chemicals), never an
+    earlier quarterly column that happens to share the same calendar
+    year."""
+
+    if not header_info or target_current_year is None or target_previous_year is None:
+        return None, None
+
+    current_x = None
+    previous_x = None
+
+    for d in header_info["dates"]:
+        if d["year"] == target_current_year:
+            current_x = d["offset"]
+        if d["year"] == target_previous_year:
+            previous_x = d["offset"]
+
+    if current_x is None or previous_x is None:
+        return None, None
+
+    return current_x, previous_x
+
+
+def calibrate_columns_from_data(layout_lines, section):
+    """Fallback column calibration for when the header itself can't be
+    parsed (resolve_year_columns returned (None, None)): scans every line
+    in the section and takes the median character offset of the last two
+    number tokens across every line carrying 2+ tokens. Real filings
+    right-align each column's figures to a consistent character position
+    throughout a table (confirmed: Tata Steel and Tata Chemicals both hold
+    their two columns within a few characters of each other across every
+    row), so the median of many rows is a robust stand-in for a header
+    this pipeline couldn't otherwise read.
+
+    `layout_lines` must be the layout-PRESERVING lines (see
+    _normalize_preserve_layout / _layout_number_tokens) - the ordinary,
+    whitespace-collapsed `lines` would put every token near character
+    offset 0, destroying the very column alignment this calibrates from.
+
+    Assumes left=FY-current/right=FY-previous - the convention observed in
+    every document seen so far, and the same convention select_fy_values()
+    already assumed unconditionally. Requires at least MIN_CALIBRATION_ROWS
+    qualifying rows before trusting the result, so a sparse/short section
+    never calibrates off 1-2 rows' worth of noise; returns (None, None,
+    False) when it can't, so callers fall back to the old, purely
+    positional behaviour rather than a shaky calibration."""
+
+    MIN_CALIBRATION_ROWS = 5
+
+    firsts = []
+    lasts = []
+
+    for idx in range(section["start"], section["end"]):
+
+        tokens = _layout_number_tokens(layout_lines[idx])
+        filtered = filter_footnote_tokens(tokens)
+
+        if len(filtered) >= 2:
+            firsts.append(filtered[-2]["start"])
+            lasts.append(filtered[-1]["start"])
+
+    if len(firsts) < MIN_CALIBRATION_ROWS:
+        return None, None, False
+
+    firsts.sort()
+    lasts.sort()
+    current_x = firsts[len(firsts) // 2]
+    previous_x = lasts[len(lasts) // 2]
+
+    return current_x, previous_x, True
+
+
+
 # TEXT NORMALIZATION
 # ============================================================
 
@@ -863,6 +1190,61 @@ def normalize_text(text):
         " ",
         text
     ).strip()
+
+
+def _normalize_preserve_layout(text):
+    """Same character-level substitutions as normalize_text() (non-
+    breaking space, currency symbol, curly quotes, dash variants), but
+    WITHOUT collapsing whitespace runs to a single space or stripping the
+    line. normalize_text()'s final "\\s+ -> ' '" collapse is exactly what
+    destroys LLMWhisperer's layout-preserving column alignment - a data
+    row's two (or five) figures are right-aligned to consistent character
+    positions across a whole table ONLY in the original, uncollapsed
+    text. Used exclusively for column-position calibration (see
+    "YEAR-COLUMN ALIGNMENT" below); every other use of OCR text in this
+    module keeps using normalize_text() exactly as before."""
+
+    if not text:
+        return ""
+
+    text = str(text)
+
+    text = text.replace(" ", " ")
+    text = text.replace("₹", " ")
+    text = text.replace("’", "'")
+    text = text.replace("‘", "'")
+    text = text.replace("–", "-")
+    text = text.replace("—", "-")
+    text = text.replace("−", "-")
+
+    return text
+
+
+def strip_line_number_prefix_layout(line):
+    """Mirrors strip_line_prefixes() below exactly - same four prefix
+    shapes stripped (OCR line number, Schedule III serial number,
+    alphabetic sub-item marker) - so a line yields the SAME set of
+    numeric tokens either way (needed for _with_layout_offsets() to be
+    able to zip the two token lists 1:1). The only difference is how much
+    trailing whitespace each strip consumes.
+
+    strip_line_prefixes() consumes the ENTIRE run of whitespace after
+    each prefix (\\s*/\\s+, unbounded), which is exactly right for VALUE
+    parsing (a token's position within the line is irrelevant there) but
+    wrong for column-POSITION purposes: on a value-only Layout-B line
+    (the row's figures on their own physical line, right-aligned with a
+    wide gap before them - see _layout_number_tokens), that unbounded
+    match eats the entire gap and collapses the row's first token to
+    character offset ~0, destroying the alignment column-calibration
+    depends on. Capping each strip at a few characters keeps the prefix
+    itself out of the count while leaving a genuine column-alignment gap
+    (which runs far longer than any real prefix separator ever does)
+    intact."""
+    line = re.sub(r"^\s*0[xX][0-9A-Fa-f]{1,8}\s*[|:] ?", "", line)
+    line = re.sub(r"^\s*\d{1,5}\s*[|:] ?", "", line)
+    line = re.sub(r"^\s*\d{1,2}\)?\s{1,3}", "", line)
+    line = re.sub(r"^\s*[a-zA-Z]\)\s{0,3}", "", line)
+    return line
 
 
 def strip_line_prefixes(line):
@@ -1042,6 +1424,21 @@ SPACE_AS_DECIMAL_BEFORE_PAREN_RE = re.compile(
     r"(\d(?:,\d{2,3})+)\s+(\d{2})\)"
 )
 
+# Bounded (\s{1,2}, not \s+) counterparts of the two defect regexes above,
+# for use in _layout_number_tokens() only: both are already narrowly-
+# shaped enough (a dangling trailing comma, or 2 digits immediately
+# followed by a closing paren) that neither could plausibly straddle a
+# genuine inter-column gap - real figures never end in a bare comma or
+# sit immediately before an unrelated ")" - but capping the span costs
+# nothing and removes any doubt when computing column positions from
+# otherwise-uncollapsed, wide-gapped text.
+_STRAY_SPACE_IN_GROUPED_NUMBER_LAYOUT_RE = re.compile(
+    r"(\d{1,2}(?:,\d{2,3})*,)\s{1,2}(\d{2,3}(?:\.\d+)?)"
+)
+_SPACE_AS_DECIMAL_BEFORE_PAREN_LAYOUT_RE = re.compile(
+    r"(\d(?:,\d{2,3})+)\s{1,2}(\d{2})\)"
+)
+
 
 def extract_number_tokens(line):
 
@@ -1069,15 +1466,83 @@ def extract_number_tokens(line):
         if value is None:
             continue
 
+        value, decimal_repaired = repair_ocr_decimal_defect(raw, value)
+
         tokens.append(
             {
                 "raw": raw,
                 "value": value,
                 "start": match.start(),
+                "decimal_repaired": decimal_repaired,
             }
         )
 
     return tokens
+
+
+def _layout_number_tokens(raw_line):
+    """Character offsets of this line's numeric tokens in the ORIGINAL,
+    layout-preserving OCR text (before normalize_text()'s whitespace
+    collapse), for column-position calibration only - see "YEAR-COLUMN
+    ALIGNMENT" below. Uses the bounded (\\s{1,2}) counterparts of the two
+    OCR-defect regexes that fix a stray space inside one number - the
+    ordinary, unbounded versions are for VALUE parsing, where a genuine
+    inter-column gap is never mistaken for the defect anyway (both require
+    a dangling trailing comma, or 2 digits immediately before a closing
+    paren, neither of which a real column boundary produces - see their
+    own docstrings) - but capping the span here removes any doubt when the
+    surrounding whitespace hasn't been collapsed. Value parsing always
+    still goes through the ordinary extract_number_tokens() on the
+    normalized line, unchanged - this function only ever supplies a
+    position, never a value."""
+
+    if not raw_line:
+        return []
+
+    line = _normalize_preserve_layout(raw_line)
+    line = strip_line_number_prefix_layout(line)
+    line = UNDERSCORE_DECIMAL_RE.sub(".", line)
+    line = _STRAY_SPACE_IN_GROUPED_NUMBER_LAYOUT_RE.sub(r"\1\2", line)
+    line = _SPACE_AS_DECIMAL_BEFORE_PAREN_LAYOUT_RE.sub(r"\1.\2)", line)
+    line = _reconstruct_indian_multidot_numbers(line)
+    line = re.sub(r"[(\[]\s*\d+(?:\s*[+\-]\s*\d+)+\s*[)\]]", "", line)
+
+    tokens = []
+
+    for match in NUMBER_TOKEN_RE.finditer(line):
+
+        raw = match.group()
+
+        if clean_number(raw) is None:
+            continue
+
+        tokens.append({"raw": raw, "start": match.start()})
+
+    return tokens
+
+
+def _with_layout_offsets(tokens, raw_line):
+    """Replaces each token's "start" with its true column position from
+    the original layout-preserving line, when the layout-based re-parse
+    of that same line finds exactly the same number of tokens (in which
+    case they correspond 1:1, in order, to `tokens`). If the counts
+    differ - e.g. a stray-space defect that only the full, whitespace-
+    collapsed parse in extract_number_tokens() knows how to repair -
+    `tokens` is returned unchanged (still valid, just without a reliable
+    layout offset for this particular row) rather than mismatching them."""
+
+    if raw_line is None:
+        return tokens
+
+    layout_tokens = _layout_number_tokens(raw_line)
+
+    if len(layout_tokens) != len(tokens):
+        return tokens
+
+    return [
+        {**t, "start": layout["start"]}
+        for t, layout in zip(tokens, layout_tokens)
+    ]
 
 
 def filter_footnote_tokens(tokens):
@@ -1248,7 +1713,7 @@ def _line_is_independent_item(line, aliases):
     )
 
 
-def locate_field(lines, section, aliases):
+def locate_field(lines, section, aliases, layout_lines=None):
 
     if section:
         search_range = range(section["start"], section["end"])
@@ -1372,6 +1837,16 @@ def locate_field(lines, section, aliases):
                 numeric_idx = candidate_idx
                 break
 
+    if layout_lines is not None:
+        # Re-expresses each token's "start" in terms of the ORIGINAL,
+        # layout-preserving OCR line (see YEAR-COLUMN ALIGNMENT) instead
+        # of the whitespace-collapsed one tokens was computed from - the
+        # only thing select_fy_values()'s column-position resolution can
+        # meaningfully compare against a section's calibrated column
+        # offsets. A count mismatch (rare - see _with_layout_offsets)
+        # leaves tokens exactly as already computed.
+        tokens = _with_layout_offsets(tokens, layout_lines[numeric_idx])
+
     return {
         "label_line_idx": best_idx,
         "label_line_text": lines[best_idx],
@@ -1381,14 +1856,50 @@ def locate_field(lines, section, aliases):
     }
 
 
-def select_fy_values(tokens, expected_count):
+# How far a single lone number's own character offset must sit from the
+# FURTHER of the two calibrated column positions, as a fraction of the
+# gap between them, before it's trusted as belonging to the NEARER one
+# (rather than left REVIEW_REQUIRED). 0.25 means the token must fall
+# within the quarter of the gap closest to one side - comfortably clear
+# of the midpoint, so a token sitting near the middle (which could
+# plausibly be an OCR-shifted reading from either column) is never
+# silently assigned to either year.
+_COLUMN_MARGIN_FRACTION = 0.25
+
+
+def _closer_column(offset, current_x, previous_x):
+    """Which of the two calibrated column positions `offset` sits nearer
+    to - "current", "previous", or None if it isn't clearly closer to
+    either (within _COLUMN_MARGIN_FRACTION of the midpoint). Never used to
+    invent a value, only to decide which year an ALREADY-EXTRACTED number
+    belongs to."""
+
+    if current_x is None or previous_x is None or current_x == previous_x:
+        return None
+
+    gap = abs(previous_x - current_x)
+    margin = gap * _COLUMN_MARGIN_FRACTION
+
+    dist_current = abs(offset - current_x)
+    dist_previous = abs(offset - previous_x)
+
+    if dist_current < dist_previous and dist_previous - dist_current >= margin:
+        return "current"
+    if dist_previous < dist_current and dist_current - dist_previous >= margin:
+        return "previous"
+    return None
+
+
+def select_fy_values(tokens, expected_count, current_x=None, previous_x=None):
 
     filtered = filter_footnote_tokens(tokens)
+    have_columns = current_x is not None and previous_x is not None
 
     if len(filtered) >= 2:
 
         fy_current = filtered[-2]["value"]
         fy_previous = filtered[-1]["value"]
+        validation_status = "OK"
 
         if expected_count and len(filtered) == expected_count:
             confidence = "high"
@@ -1397,19 +1908,76 @@ def select_fy_values(tokens, expected_count):
         else:
             confidence = "low"
 
+        # Cross-check the array-position assumption (last-two-tokens =
+        # [current, previous]) against where these two tokens actually
+        # sit, when a column calibration is available. This never
+        # overrides a clean match (the last two tokens landing nearer
+        # their expected column each) - it only catches the row genuinely
+        # printing them in the OPPOSITE order (a mismatch this pipeline
+        # must not silently paper over per the year-alignment audit).
+        if have_columns:
+            side_a = _closer_column(filtered[-2]["start"], current_x, previous_x)
+            side_b = _closer_column(filtered[-1]["start"], current_x, previous_x)
+            if side_a == "previous" and side_b == "current":
+                # Positions say the array order is reversed for this row.
+                fy_current, fy_previous = fy_previous, fy_current
+                validation_status = "OK"
+            elif side_a is not None and side_b is not None and side_a == side_b:
+                # Both of the last two tokens sit nearer the SAME column -
+                # they cannot both be that year's figure, so which one is
+                # FY-current cannot be read off this row with confidence.
+                validation_status = "REVIEW_REQUIRED"
+
     elif len(filtered) == 1:
 
-        fy_current = filtered[0]["value"]
-        fy_previous = None
-        confidence = "low"
+        offset = filtered[0]["start"]
+        side = _closer_column(offset, current_x, previous_x) if have_columns else None
+
+        if side == "current":
+            fy_current = filtered[0]["value"]
+            fy_previous = None
+            confidence = "medium"
+            validation_status = "OK"
+        elif side == "previous":
+            # The row's one visible figure sits in the FY-previous column
+            # position - e.g. the FY-current cell was genuinely blank/nil
+            # in the source (confirmed real case: Tata Chemicals' Cash and
+            # cash equivalents row prints only one number, aligned to the
+            # FY-previous column, with the FY-current column empty).
+            # Assigning it to "current" merely because it's the only token
+            # present would silently shift a real prior-year figure into
+            # the wrong year - exactly what the year-alignment audit
+            # requires this pipeline not to do.
+            fy_current = None
+            fy_previous = filtered[0]["value"]
+            confidence = "medium"
+            validation_status = "OK"
+        elif have_columns:
+            # A column calibration exists but this token isn't clearly
+            # closer to either side - genuinely ambiguous, not guessed.
+            fy_current = None
+            fy_previous = None
+            confidence = "low"
+            validation_status = "REVIEW_REQUIRED"
+        else:
+            # No column calibration available for this section at all
+            # (header unparseable AND too few data rows to calibrate from)
+            # - falls back to the pipeline's original behaviour (treat the
+            # lone figure as FY-current) rather than blocking every such
+            # row across a whole section on a missing calibration.
+            fy_current = filtered[0]["value"]
+            fy_previous = None
+            confidence = "low"
+            validation_status = "OK"
 
     else:
 
         fy_current = None
         fy_previous = None
         confidence = "none"
+        validation_status = "OK"
 
-    return fy_current, fy_previous, confidence, filtered
+    return fy_current, fy_previous, confidence, filtered, validation_status
 
 
 # "Net worth" is the one row in the Regulation 52(4) "Reported Ratios"
@@ -1435,7 +2003,7 @@ def select_fy_values(tokens, expected_count):
 # definition change between its quarterly and annual columns), so
 # reusing this column-selection logic there would be wrong, not
 # merely unnecessary.
-def select_fy_values_net_worth(tokens, expected_count):
+def select_fy_values_net_worth(tokens, expected_count, current_x=None, previous_x=None):
 
     filtered = filter_footnote_tokens(tokens)
 
@@ -1445,7 +2013,7 @@ def select_fy_values_net_worth(tokens, expected_count):
     # falls back to the ordinary last-two-tokens selection rather than
     # indexing into columns that were never established to exist.
     if len(filtered) < 3:
-        return select_fy_values(tokens, expected_count)
+        return select_fy_values(tokens, expected_count, current_x, previous_x)
 
     fy_current = filtered[0]["value"]
     fy_previous = filtered[2]["value"]
@@ -1455,7 +2023,7 @@ def select_fy_values_net_worth(tokens, expected_count):
         else "medium"
     )
 
-    return fy_current, fy_previous, confidence, filtered
+    return fy_current, fy_previous, confidence, filtered, "OK"
 
 
 # ============================================================
@@ -1564,83 +2132,87 @@ def run_llmwhisperer(pdf_path):
 
 
 # ============================================================
-# SIBLING-MAGNITUDE REPAIR
+# OCR DECIMAL-POINT-DEFECT REPAIR
 #
-# Two more OCR number defects observed in these filings, both
-# producing a "clean" integer where a 2-decimal figure was intended:
-# a dropped decimal point ("606714" for what should read "6067.14")
-# and a decimal point mis-read as a comma ("0,25", which ordinary
-# comma-stripping turns into "25" instead of "0.25"). Neither defect
-# is safely detectable from the token in isolation - a large whole
-# number is not inherently wrong. What makes it recognisable is its
-# own sibling: the same field's other reported year, already parsed.
-# When the two are wildly inconsistent (>=20x) purely because of a
-# trailing ".XX" and dividing by 100 brings them back into a
-# plausible range of each other (<=10x), the /100 reading is used.
-# This never inserts a decimal point into a number considered on its
-# own, and a genuine large year-over-year swing between two cleanly
-# parsed figures is left untouched.
+# A real, confirmed OCR defect in these filings' comma-grouped numbers:
+# the decimal point is dropped and its 2 fractional digits merge into the
+# preceding comma group, e.g. "1,03269" for what the source actually
+# prints as "1,032.69", or "6,06714" for "6,067.14" (both found, byte for
+# byte, in the Tata Steel filing's own raw OCR text - "Other balances with
+# banks" and "Interest paid" respectively).
+#
+# This used to be "repaired" by comparing a value against its own
+# sibling (the same field's other reported year) and guessing a /100
+# correction whenever the two looked "implausibly" far apart - but
+# "implausibly far apart" is not a safe signal on its own: real financial
+# figures legitimately swing by 40x+ year-over-year (confirmed, real case:
+# Tata Chemicals' Current Borrowings genuinely falls from Rs 481 crore to
+# Rs 12 crore), and that sibling-comparison heuristic mangled the
+# genuine 481 into 4.81 purely because it looked "too different" from 12 -
+# exactly the "silent unit-scaling guess" the extraction audit forbids.
+#
+# The fix below instead reads the defect directly off ONE token's own
+# text shape - never compares it to any other field, year, or sibling -
+# so a clean, un-grouped, genuinely large number like "481" (no comma at
+# all) can never be mistaken for this defect, while "1,03269" and
+# "6,06714" (which DO carry the tell-tale malformed 5-digit trailing
+# comma-group) are still corrected exactly as before.
 # ============================================================
 
-def _maybe_divide_by_100(value, sibling):
+# A comma-grouped number whose FINAL (rightmost) group has more than the
+# 3 digits every valid thousands-grouping convention requires. Restricted
+# to exactly 5 trailing digits (3 valid grouping digits + 2 merged
+# decimal digits) - the one shape actually confirmed in these filings;
+# a 4- or 6+-digit trailing group has no single unambiguous
+# interpretation and is deliberately left unrepaired rather than guessed.
+_MALFORMED_TRAILING_GROUP_RE = re.compile(r"^-?\d{1,2}(?:,\d{2,3})*,(\d{4,})$")
 
-    if value is None or sibling is None:
+# The opposite-shaped defect: OCR misreads the decimal point itself as a
+# comma (e.g. "0,25" for "0.25" - confirmed, real case: Tata Steel's own
+# "Total debts to total assets ratio" row). A comma's rightmost group must
+# have exactly 3 digits under every real thousands-grouping convention
+# (international, or Indian for the group closest to the decimal point) -
+# a group of exactly 1-2 digits sitting at the very END of the number is
+# never a genuine thousands separator (nobody writes "1,25" to mean
+# "1,250"; if the value were under 1000 it would never be comma-grouped
+# at all), so this shape is just as unambiguous as the one above, and
+# purely a property of this one token's own text - never a sibling
+# comparison.
+_COMMA_AS_DECIMAL_RE = re.compile(r"^-?\d{1,2}(?:,\d{2,3})*,(\d{1,2})$")
+
+
+def repair_ocr_decimal_defect(raw, value):
+    """Per-token, text-shape-only repair for the dropped-decimal defect
+    described above. `raw` is the token's own original matched text (e.g.
+    "(6,06714)"); `value` is its already-parsed float (sign and any %/x
+    suffix already applied by clean_number()). Returns (possibly-corrected
+    value, True) when the defect's exact signature is found, else
+    (value, False) unchanged - never touches a token with no comma, or
+    whose trailing group is already a valid 2- or 3-digit group."""
+
+    if value is None:
         return value, False
 
-    if value == 0 or sibling == 0:
-        return value, False
+    core = raw.strip()
+    if core.startswith("(") and core.endswith(")"):
+        core = core[1:-1]
+    core = core.rstrip("%xX").strip()
 
-    if value != int(value):
-        return value, False
+    match = _MALFORMED_TRAILING_GROUP_RE.match(core)
+    if match and len(match.group(1)) == 5:
+        digits = core.replace(",", "")
+        corrected_magnitude = float(digits[:-2] + "." + digits[-2:])
+        return (-corrected_magnitude if value < 0 else corrected_magnitude), True
 
-    ratio = abs(value) / abs(sibling)
-
-    if ratio < 20:
-        return value, False
-
-    candidate = value / 100.0
-
-    candidate_ratio = (
-        max(abs(candidate), abs(sibling)) / min(abs(candidate), abs(sibling))
-    )
-
-    if candidate_ratio <= 10:
-        return candidate, True
+    match = _COMMA_AS_DECIMAL_RE.match(core)
+    if match:
+        last_comma = core.rindex(",")
+        whole_part = core[:last_comma].replace(",", "").replace("-", "") or "0"
+        frac_part = core[last_comma + 1:]
+        corrected_magnitude = float(whole_part + "." + frac_part)
+        return (-corrected_magnitude if value < 0 else corrected_magnitude), True
 
     return value, False
-
-
-def repair_sibling_magnitude(fy_current, fy_previous):
-
-    new_current, current_changed = _maybe_divide_by_100(fy_current, fy_previous)
-    new_previous, previous_changed = _maybe_divide_by_100(fy_previous, fy_current)
-
-    return new_current, new_previous, (current_changed or previous_changed)
-
-
-# Ratio beyond which two of a field's own reported years are too
-# magnitude-inconsistent to trust, even after repair_sibling_magnitude()
-# above has had a chance to resolve it (that function only fires when
-# one side is a "clean" integer - a dropped decimal or a comma-as-
-# decimal defect; when BOTH sides already carry a fraction, as with a
-# multi-column figure fragmented by badly garbled digit grouping, there
-# is nothing for it to repair). A ratio this extreme between the same
-# field's own two years almost always means the source OCR text was too
-# garbled to recover a genuine trailing figure, not a real swing -
-# populate_workbook() must not write either fragment into the workbook
-# for a field flagged this way. General to any field, not specific to
-# any one filer's data.
-AMBIGUOUS_MAGNITUDE_RATIO = 15
-
-
-def is_magnitude_ambiguous(fy_current, fy_previous):
-
-    if fy_current in (None, 0) or fy_previous in (None, 0):
-        return False
-
-    ratio = max(abs(fy_current), abs(fy_previous)) / min(abs(fy_current), abs(fy_previous))
-
-    return ratio >= AMBIGUOUS_MAGNITUDE_RATIO
 
 
 # ============================================================
@@ -1649,10 +2221,23 @@ def is_magnitude_ambiguous(fy_current, fy_previous):
 
 def extract_financial_values(ocr_text, template_path):
 
-    lines = [
-        normalize_text(x)
-        for x in ocr_text.splitlines()
-        if normalize_text(x)
+    # `lines` (whitespace-collapsed) drives every text-content match in
+    # this function - alias matching, section headings, subsection
+    # headings - exactly as before. `layout_lines` keeps the SAME lines
+    # (same filtering, so the two stay index-aligned) with their original
+    # LLMWhisperer column spacing intact, for column-position calibration
+    # only (see "YEAR-COLUMN ALIGNMENT" above) - normalize_text()'s
+    # whitespace collapse would otherwise put every token near character
+    # offset 0, destroying the alignment a column calibration depends on.
+    raw_and_normalized = [
+        (raw, normalize_text(raw)) for raw in ocr_text.splitlines()
+    ]
+    raw_and_normalized = [
+        (raw, norm) for raw, norm in raw_and_normalized if norm
+    ]
+    lines = [norm for _raw, norm in raw_and_normalized]
+    layout_lines = [
+        _normalize_preserve_layout(raw) for raw, _norm in raw_and_normalized
     ]
 
     target_current_year, target_previous_year, current_label, previous_label = (
@@ -1663,18 +2248,45 @@ def extract_financial_values(ocr_text, template_path):
 
     section_by_type = {}
     header_by_type = {}
+    columns_by_type = {}
 
     for section_type in ("PNL", "BS", "CF", "RATIO"):
 
         section = pick_section(sections, section_type)
         section_by_type[section_type] = section
 
-        if section:
-            header_by_type[section_type] = detect_header_periods(
-                lines, section["start"], section["end"]
-            )
-        else:
+        if not section:
             header_by_type[section_type] = None
+            columns_by_type[section_type] = (None, None, "NO_SECTION")
+            continue
+
+        header_info = detect_header_periods(
+            layout_lines, section["start"], section["end"]
+        )
+        header_by_type[section_type] = header_info
+
+        # Year-column calibration for this whole section (see
+        # "YEAR-COLUMN ALIGNMENT" above): prefer the header's own detected
+        # year positions, matched against the two fiscal years the
+        # template itself asks for; fall back to the median position of
+        # every 2-token data row in the section when the header can't be
+        # read (e.g. a split-across-lines date header this pipeline still
+        # doesn't recognise). Computed ONCE per section and reused for
+        # every field in it (and every one of its BS subsections, which
+        # share the same table and therefore the same columns) rather
+        # than recalibrated per field.
+        current_x, previous_x = resolve_year_columns(
+            header_info, target_current_year, target_previous_year
+        )
+        column_source = "header"
+
+        if current_x is None or previous_x is None:
+            current_x, previous_x, confident = calibrate_columns_from_data(
+                layout_lines, section
+            )
+            column_source = "data_median" if confident else "unavailable"
+
+        columns_by_type[section_type] = (current_x, previous_x, column_source)
 
     bs_subsections = find_bs_subsections(lines, section_by_type["BS"])
 
@@ -1695,10 +2307,11 @@ def extract_financial_values(ocr_text, template_path):
 
         header_info = header_by_type[section_type]
         expected_count = header_info["count"] if header_info else None
+        current_x, previous_x, column_source = columns_by_type[section_type]
 
         aliases = ALIASES[field]
 
-        loc = locate_field(lines, section, aliases)
+        loc = locate_field(lines, section, aliases, layout_lines)
 
         row = ROW_MAPPING.get(field)
         excel_cell = (
@@ -1712,6 +2325,11 @@ def extract_financial_values(ocr_text, template_path):
                 "fy_previous": None,
                 "normalized": False,
                 "ambiguous": False,
+                "validation_status": "NOT_FOUND",
+                "extraction_method": None,
+                "source_line_number": None,
+                "source_text": None,
+                "confidence": "none",
             }
 
             debug_rows.append(
@@ -1726,6 +2344,7 @@ def extract_financial_values(ocr_text, template_path):
                     "Confidence": "none",
                     "Normalized": False,
                     "Ambiguous": False,
+                    "Validation Status": "NOT_FOUND",
                 }
             )
 
@@ -1736,27 +2355,54 @@ def extract_financial_values(ocr_text, template_path):
             else select_fy_values
         )
 
-        fy_current, fy_previous, confidence, filtered_tokens = (
-            selector(loc["tokens"], expected_count)
+        fy_current, fy_previous, confidence, filtered_tokens, validation_status = (
+            selector(loc["tokens"], expected_count, current_x, previous_x)
         )
 
-        fy_current, fy_previous, normalized = repair_sibling_magnitude(
-            fy_current, fy_previous
+        # A dropped-decimal OCR defect (see repair_ocr_decimal_defect) was
+        # already corrected per-token inside extract_number_tokens(),
+        # purely from that token's own text shape - never by comparing it
+        # to a sibling value. "normalized" here is only a traceability
+        # flag recording that this row's own figures needed that
+        # correction, for the debug report - it does not change any value.
+        normalized = any(t.get("decimal_repaired") for t in filtered_tokens)
+
+        # "ambiguous" now means the column/year alignment for this row
+        # could not be confidently resolved (validation_status ==
+        # REVIEW_REQUIRED, set by select_fy_values() above when a row's
+        # own number(s) don't clearly align with either calibrated
+        # column) - NOT a magnitude-ratio guess. A field flagged this way
+        # is intentionally withheld by populate_workbook() rather than
+        # writing a value this pipeline cannot confidently attribute to
+        # the right fiscal year.
+        ambiguous = validation_status == "REVIEW_REQUIRED"
+
+        extraction_method = (
+            "same_line" if loc["numeric_line_idx"] == loc["label_line_idx"]
+            else "adjacent_line"
         )
 
-        ambiguous = is_magnitude_ambiguous(fy_current, fy_previous)
-
-        # extracted[field] keeps the actual parsed figures - populate_
-        # workbook() is the single place that decides, from the
-        # "ambiguous" flag, whether they are safe to write. debug_rows
-        # mirrors the same parsed figures + flag so the diagnostic can
-        # report *what was found* alongside *why it was suppressed*,
-        # rather than looking like nothing was found at all.
+        # extracted[field] keeps the actual parsed figures plus enough
+        # metadata (source line, method, column-calibration source,
+        # validation status) to answer "why this value, from where, how
+        # confident" without cluttering the normal UI - see the extraction
+        # audit's traceability requirement. populate_workbook() is the
+        # single place that decides, from the "ambiguous" flag, whether
+        # the figures are safe to write. debug_rows mirrors the same
+        # parsed figures + flags so the diagnostic can report *what was
+        # found* alongside *why it was suppressed*, rather than looking
+        # like nothing was found at all.
         extracted[field] = {
             "fy_current": fy_current,
             "fy_previous": fy_previous,
             "normalized": normalized,
             "ambiguous": ambiguous,
+            "validation_status": validation_status,
+            "extraction_method": extraction_method,
+            "source_line_number": loc["numeric_line_idx"],
+            "source_text": loc["numeric_line_text"],
+            "confidence": confidence,
+            "column_source": column_source,
         }
 
         source_line = loc["label_line_text"]
@@ -1779,6 +2425,7 @@ def extract_financial_values(ocr_text, template_path):
                 "Confidence": confidence,
                 "Normalized": normalized,
                 "Ambiguous": ambiguous,
+                "Validation Status": validation_status,
             }
         )
 
@@ -1868,9 +2515,10 @@ def populate_workbook(template_path, extracted):
         # other row uses the ordinary B=current/C=previous layout.
         previous_col = 4 if FIELD_SECTION.get(field) == "RATIO" else 3
 
-        # A field flagged ambiguous (its two reported years are too
-        # magnitude-inconsistent to trust - see is_magnitude_ambiguous())
-        # is never written. The cell is actively cleared rather than
+        # A field flagged ambiguous (its column/year alignment could not
+        # be confidently resolved - validation_status == REVIEW_REQUIRED,
+        # set by select_fy_values()'s column-position check) is never
+        # written. The cell is actively cleared rather than
         # simply skipped: several of these extraction rows carry a
         # template-supplied placeholder formula (e.g. row 56's D column
         # defaults to "=C25") that would otherwise surface as soon as
@@ -1977,6 +2625,9 @@ def save_debug_artifacts(ocr_text, debug_rows):
         "FY2025 Selected",
         "Excel Cell",
         "Confidence",
+        "Normalized",
+        "Ambiguous",
+        "Validation Status",
     ]
 
     with open(report_path, "w", encoding="utf-8", newline="") as f:

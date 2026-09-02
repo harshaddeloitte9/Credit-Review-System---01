@@ -352,30 +352,37 @@ def build_financial_analysis(bundle: ReferenceBundle) -> FinancialAnalysisResult
                            "for this document.")
 
     unavailable = []
-    if d.revenue.current is None:
-        unavailable.append("Revenue")
-    if m.net_profit.current is None:
-        unavailable.append("Net Profit")
-    if d.total_assets.current is None:
-        unavailable.append("Total Assets")
-    if d.operating_cash_flow.current is None:
-        unavailable.append("Operating Cash Flow")
-    if net_profit_margin_pct_cur is None:
-        unavailable.append("Net Profit Margin %")
-    if d.reported_debt_equity.current is None:
-        unavailable.append("Debt-Equity")
-    if d.reported_dscr.current is None:
-        unavailable.append("DSCR")
-    if d.reported_iscr.current is None:
-        unavailable.append("ISCR")
-    if d.reported_current_ratio.current is None:
-        unavailable.append("Current Ratio")
-    if d.reported_debt_assets.current is None:
-        unavailable.append("Debt/Assets")
-    if d.reported_debtors_turnover_days.current is None:
-        unavailable.append("Debtors Days")
-    if d.reported_inventory_turnover_days.current is None:
-        unavailable.append("Inventory Days")
+    critical_unavailable = []
+
+    # These 8 are the metrics a credit decision cannot be soundly made
+    # without - explicitly named as such in the extraction/completeness
+    # audit ("Revenue, Profit, Operating Cash Flow, DSCR, ISCR, Current
+    # Ratio, Debt-Equity Ratio", plus Total Assets from the same audit's
+    # "Critical Fields" list). Every OTHER metric the gate below spans
+    # (Net Worth, Debt/Assets, EBITDA Margin %, Net Profit Margin %,
+    # OCF-to-Debt, Debtors/Inventory Days) is still evaluated when
+    # available and still excluded (not assumed Pass) when it isn't -
+    # exactly as before - but is not itself grounds to block Approve,
+    # matching the reference workbook's own precedent of excluding a
+    # metric (Total Debt) from the gate without blocking the decision.
+    def _mark(label, value, is_critical):
+        if value is None:
+            unavailable.append(label)
+            if is_critical:
+                critical_unavailable.append(label)
+
+    _mark("Revenue", d.revenue.current, True)
+    _mark("Net Profit", m.net_profit.current, True)
+    _mark("Total Assets", d.total_assets.current, True)
+    _mark("Operating Cash Flow", d.operating_cash_flow.current, True)
+    _mark("DSCR", d.reported_dscr.current, True)
+    _mark("ISCR", d.reported_iscr.current, True)
+    _mark("Current Ratio", d.reported_current_ratio.current, True)
+    _mark("Debt-Equity", d.reported_debt_equity.current, True)
+    _mark("Net Profit Margin %", net_profit_margin_pct_cur, False)
+    _mark("Debt/Assets", d.reported_debt_assets.current, False)
+    _mark("Debtors Days", d.reported_debtors_turnover_days.current, False)
+    _mark("Inventory Days", d.reported_inventory_turnover_days.current, False)
 
     if not statuses_used_for_gate:
         # Every metric this gate could span is unavailable for this
@@ -386,6 +393,22 @@ def build_financial_analysis(bundle: ReferenceBundle) -> FinancialAnalysisResult
             "None of the metrics the Approve/Reject gate spans could be computed from this "
             "document - no status is assumed in their absence."
         )
+    elif critical_unavailable:
+        # At least one of the metrics this application treats as
+        # required for the decision (see the list above) is missing,
+        # invalid, or could not be confidently mapped to a fiscal year
+        # (an ambiguous OCR extraction is withheld upstream and reaches
+        # here as the same None a genuinely undisclosed figure would) -
+        # Approve/Reject would be drawn from an incomplete picture, so
+        # this is reported as requiring manual review instead of guessing
+        # which way an incomplete gate would have resolved.
+        overall_status = "Not Available / Requires Review"
+        overall_status_note = (
+            f"Automatic decision unavailable because this document's own figures do not include a "
+            f"reliably extracted value for: {', '.join(critical_unavailable)}. These are required for "
+            f"the Approve/Reject decision; the {len(statuses_used_for_gate)} other metric(s) that were "
+            f"computed are shown above for reference but do not, on their own, resolve the gate."
+        )
     else:
         overall_status = "Approve" if all(s == "Pass" for s in statuses_used_for_gate) else "Reject"
         if unavailable:
@@ -394,7 +417,9 @@ def build_financial_analysis(bundle: ReferenceBundle) -> FinancialAnalysisResult
                 f"document (matches the reference workbook's own gate, which likewise excludes the "
                 f"Total Debt row). The reference gate also spans the Reported Ratios block and "
                 f"Debtors/Inventory Days (H18:H26); {', '.join(unavailable)} cannot be evaluated for "
-                f"this document (not disclosed/not extractable) - excluded rather than assumed Pass."
+                f"this document (not disclosed/not extractable) - excluded rather than assumed Pass. "
+                f"None of these is one of the metrics required for the decision, so Approve/Reject is "
+                f"still resolved."
             )
         else:
             overall_status_note = (

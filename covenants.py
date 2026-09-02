@@ -18,6 +18,19 @@ Formulas reproduced exactly as found in '4-Covenants':
     Headroom  = (Actual - Threshold) / Threshold                  (D11, D12)
     RAG       = GREEN if Headroom > 20%, AMBER if >= 5%, else RED  (E11, E12)
     Overall   = "PASS" unless any covenant is AMBER or RED         (E14)
+
+FIXED (not a reference-workbook formula, a gap this module's own Python
+introduced): the reference workbook's E14 has no notion of a covenant
+being un-evaluable at all (every cell in its worked example is filled
+in), so it offers no precedent either way for what "PASS unless AMBER/RED"
+should do when a covenant's underlying figure is missing. The original
+Python here interpreted that silence as "exclude it and pass on whatever
+is left" - so a document missing ISCR (not every filing discloses it) but
+passing DSCR would show a clean overall "PASS", never having actually
+confirmed ISCR compliance. build_covenants() below now treats a missing
+REQUIRED covenant as blocking a clean PASS (see its own comment) - a
+breach still takes precedence over a gap, but a gap can no longer read as
+compliance.
 """
 
 from dataclasses import dataclass, field
@@ -91,18 +104,36 @@ def build_covenants(fa, policy: CovenantPolicy) -> CovenantsResult:
 
     evaluable_rows = [r for r in rows if r.rag != NOT_AVAILABLE]
     unavailable_labels = [r.label.split(",")[0] for r in rows if r.rag == NOT_AVAILABLE]
+    # '4-Covenants'!E14: PASS unless any (evaluable) covenant is AMBER or RED
+    breach = any(r.rag in ("AMBER", "RED") for r in evaluable_rows)
 
-    if not evaluable_rows:
-        overall_status = NOT_AVAILABLE
-        note = "Neither covenant could be evaluated - this document's Reported Ratios disclosure includes neither DSCR nor ISCR."
-    else:
-        # '4-Covenants'!E14: PASS unless any (evaluable) covenant is AMBER or RED
-        breach = any(r.rag in ("AMBER", "RED") for r in evaluable_rows)
-        overall_status = "NOT PASS" if breach else "PASS"
+    # Explicit precedence across the three states this gate can land in -
+    # a breach is reported even if another covenant is ALSO missing (the
+    # breach is the more urgent fact); short of a breach, any required
+    # covenant that could not be evaluated must stop this from reading as
+    # a clean PASS. Fixed here: previously, a missing ISCR alongside a
+    # passing DSCR still produced an overall "PASS" - compliance was never
+    # actually confirmed in full, just silently treated as if it had been.
+    if breach:
+        overall_status = "NOT PASS"
         note = (
             f"{' and '.join(unavailable_labels)} could not be evaluated (not disclosed in this "
-            f"document) and is excluded from this status rather than assumed compliant."
+            f"document) and is excluded from this status."
             if unavailable_labels else ""
         )
+    elif not evaluable_rows:
+        overall_status = NOT_AVAILABLE
+        note = "Neither covenant could be evaluated - this document's Reported Ratios disclosure includes neither DSCR nor ISCR."
+    elif unavailable_labels:
+        overall_status = NOT_AVAILABLE
+        note = (
+            f"{' and '.join(unavailable_labels)} could not be evaluated (not disclosed in this "
+            f"document). The covenant(s) that could be checked are within limits, but overall "
+            f"compliance cannot be confirmed without {' and '.join(unavailable_labels)} - not "
+            f"assumed compliant in its absence."
+        )
+    else:
+        overall_status = "PASS"
+        note = ""
 
     return CovenantsResult(rows=rows, overall_status=overall_status, overall_status_note=note)

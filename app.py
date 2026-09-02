@@ -1,5 +1,6 @@
 import os
 import tempfile
+from dataclasses import replace as _dc_replace
 
 import streamlit as st
 from openpyxl import load_workbook
@@ -7,11 +8,14 @@ from openpyxl import load_workbook
 from reference_data import load_reference_bundle, ReferenceDataError
 from workbook_validation import validate_workbook
 import ocr_upload
-from input_data_engine import compute_derived_metrics, run_validation_checks
+from input_data_engine import compute_derived_metrics, run_validation_checks, compute_data_completeness
 from financial_analysis import build_financial_analysis
 from risk_scoring import build_risk_scoring
 from covenants import load_covenant_policy, build_covenants
-from collateral_assessment import load_collateral_inputs, build_collateral_assessment
+from collateral_assessment import (
+    load_collateral_inputs, build_collateral_assessment,
+    compute_post_sanction_coverage, POST_SANCTION_BASIS_LABEL,
+)
 from limit_setting import (
     load_limit_setting_policy, build_limit_setting, LimitSettingResult,
     FundBasedInputs, build_fund_based_limit,
@@ -20,6 +24,7 @@ from limit_setting import (
 from continuous_monitoring import load_monitoring_policy, build_continuous_monitoring
 from portfolio_monitoring import load_portfolio_inputs, build_portfolio_monitoring
 from credit_memo import load_credit_memo_commentary, build_credit_memo
+from proposed_exposure import build_proposed_exposure, check_exposure_reconciliation
 # validate_* functions (validation.py / validation_extended.py) are
 # intentionally NOT imported here anymore - "Validation vs reference
 # workbook" is no longer part of the user-facing UI (see the current
@@ -102,6 +107,23 @@ PDF_SESSION_KEYS = [
     ("extraction_total_fields", None),
     ("ocr_reused", False),
     ("pdf_processing_failed_stage", None),
+    # AI-assisted validation (Phase 2) - advisory only, see ai_validation.py.
+    # Reset alongside every other per-upload key so a new PDF never
+    # inherits a previous borrower's AI validation results.
+    ("ai_validation_results", None),
+    ("ai_presence_results", None),
+    ("ai_validation_available", False),
+    ("ai_validation_detail", None),
+    ("ai_technical_counts", None),
+    ("ai_validation_counts", None),
+    ("ai_presence_counts", None),
+    # AI-assisted mapping correction proposals (Phase 3A) - advisory
+    # only, see ai_correction_proposals.py. Same per-upload reset.
+    ("correction_proposals", None),
+    ("correction_available", False),
+    ("correction_detail", None),
+    ("correction_technical_counts", None),
+    ("correction_proposal_counts", None),
 ]
 
 # Fund-Based / Non-Fund-Based Limit Setting - analyst-entered assumptions
@@ -161,6 +183,39 @@ def _reset_fb_nfb_session_state():
         st.session_state.pop(_widget_key, None)
 
 
+# Deal-specific exposure inputs (Limit Setting / proposed_exposure.py) -
+# PDF-upload mode only. Requested Amount replaces what used to be a fixed
+# reference-workbook constant ('6-Limit Setting'!B4, unchanged for every
+# borrower ever uploaded - see demo_source.py, which only ever replaces
+# '1-Input Data') with the analyst's own per-deal entry. Sanctioned
+# Amount is an optional override of Recommended Limit (e.g. "committee
+# approved a different figure") and applies in BOTH modes, since there is
+# no "sanctioned amount" concept anywhere in the reference workbook to
+# begin with - this is purely additive, never overriding a workbook value.
+# Same reset-on-new-upload treatment as FB/NFB, and the same reason.
+_DEAL_VALUE_KEYS = [
+    ("deal_requested_amount", None),
+    ("deal_sanctioned_override", None),
+]
+_DEAL_WIDGET_KEYS = [f"_{key}_widget" for key, _default in _DEAL_VALUE_KEYS]
+
+DEAL_SESSION_KEYS = _DEAL_VALUE_KEYS + [
+    # Requested Amount defaults, once per upload, to the active workbook's
+    # own '6-Limit Setting'!B4 (a sensible starting figure, editable
+    # thereafter) - same "prefilled_for upload identity" mechanism as the
+    # FB fields above, for the same reason (self-healing across a code
+    # hot-reload).
+    ("_deal_requested_amount_prefilled_for", None),
+]
+
+
+def _reset_deal_session_state():
+    for _key, _default in DEAL_SESSION_KEYS:
+        st.session_state[_key] = _default
+    for _widget_key in _DEAL_WIDGET_KEYS:
+        st.session_state.pop(_widget_key, None)
+
+
 def _cleanup_pdf_artifacts():
     """Removes the temp files a previous PDF upload generated (raw OCR
     text, extracted workbook). The merged workbook is not removed here -
@@ -193,6 +248,7 @@ def _reset_to_no_data():
     ] + PDF_SESSION_KEYS:
         st.session_state[_key] = _default
     _reset_fb_nfb_session_state()
+    _reset_deal_session_state()
 
 
 def _read_file_bytes(path):
@@ -275,13 +331,14 @@ for _key, _default in [
     ("uploaded_workbook_warnings", []),
     ("_last_upload_id", None),
     ("uploader_key_version", 0),
-] + PDF_SESSION_KEYS + FB_NFB_SESSION_KEYS:
+] + PDF_SESSION_KEYS + FB_NFB_SESSION_KEYS + DEAL_SESSION_KEYS:
     if _key not in st.session_state:
         st.session_state[_key] = _default
-# _FB_NFB_WIDGET_KEYS are deliberately NOT initialized here - see the
-# comment above their definition. They come into existence only via
-# their own st.number_input's first instantiation (correctly seeded from
-# the value keys just initialized above) or not at all until then.
+# _FB_NFB_WIDGET_KEYS / _DEAL_WIDGET_KEYS are deliberately NOT initialized
+# here - see the comment above their definitions. They come into
+# existence only via their own st.number_input's first instantiation
+# (correctly seeded from the value keys just initialized above) or not at
+# all until then.
 
 _using_upload = st.session_state["source_mode"] == "uploaded" and st.session_state["uploaded_workbook_path"]
 _using_pdf = st.session_state["source_mode"] == "pdf" and st.session_state["merged_workbook_path"]
@@ -360,6 +417,81 @@ if d is not None and st.session_state.get("_fb_inventory_days_prefilled_for") !=
 if d is not None and st.session_state.get("_fb_receivable_days_prefilled_for") != _fb_prefill_identity:
     st.session_state["fb_receivable_days"] = d.reported_debtors_turnover_days.current
     st.session_state["_fb_receivable_days_prefilled_for"] = _fb_prefill_identity
+
+# Requested Amount (Limit Setting / proposed_exposure.py) - PDF-upload
+# mode only. Defaults once, per upload, to the active workbook's own
+# '6-Limit Setting'!B4 (a sensible starting figure - the same one this
+# cell has always shown, just no longer a frozen constant) - editable
+# thereafter on the Limit Setting page. Advanced/uploaded-workbook mode
+# never uses this session key at all; it keeps reading B4 directly,
+# unchanged (see the PROPOSED EXPOSURE block just below).
+if d is not None and st.session_state.get("source_mode") == "pdf":
+    _deal_limit_policy_for_prefill = load_limit_setting_policy(bundle.workbook_path)
+    if st.session_state.get("_deal_requested_amount_prefilled_for") != _fb_prefill_identity:
+        st.session_state["deal_requested_amount"] = _deal_limit_policy_for_prefill.requested_amount
+        st.session_state["_deal_requested_amount_prefilled_for"] = _fb_prefill_identity
+
+# ============================================================
+# PROPOSED EXPOSURE - single shared source of truth for Requested/
+# Recommended/Sanctioned Amount, Proposed Funded Exposure, NFB Commitment
+# and Total Proposed Commitment (see proposed_exposure.py). Computed
+# centrally, once, exactly like the FB/NFB prefill above and for the
+# identical reason - so every downstream page (Limit Setting, Portfolio
+# Monitoring, Collateral Assessment, Credit Memo) reads the SAME figures
+# rather than each re-deriving its own copy of "the loan amount".
+#
+#   PDF-upload mode: Requested Amount is the analyst's own session-state
+#     entry (see the prefill block above) - '6-Limit Setting'!B4 was a
+#     frozen constant, identical for every borrower ever uploaded (see
+#     demo_source.py, which replaces only '1-Input Data'), so nothing
+#     genuine is being overridden.
+#   Advanced/uploaded-workbook mode: unchanged - that workbook's own B4
+#     is a genuinely independent, analyst-supplied figure for THIS
+#     workbook, never overridden by session-state.
+# ============================================================
+
+exposure = None
+if d is not None:
+    _limit_policy = load_limit_setting_policy(bundle.workbook_path)
+
+    if st.session_state.get("source_mode") == "pdf":
+        _requested_amount = st.session_state.get("deal_requested_amount")
+    else:
+        _requested_amount = _limit_policy.requested_amount
+
+    if (
+        fa.derived.ebit.current is not None
+        and d.reported_dscr.current is not None
+        and _requested_amount is not None
+    ):
+        _recommended_limit = build_limit_setting(
+            _dc_replace(_limit_policy, requested_amount=_requested_amount),
+            fa.derived.ebit.current, d.reported_dscr.current,
+        ).recommended_limit
+    else:
+        _recommended_limit = None
+
+    _fb_result_for_exposure = build_fund_based_limit(FundBasedInputs(
+        annual_sales=st.session_state["fb_annual_sales"],
+        inventory_days=st.session_state["fb_inventory_days"],
+        receivable_days=st.session_state["fb_receivable_days"],
+        payable_days=st.session_state["fb_payable_days"],
+        contribution_pct=st.session_state["fb_contribution_pct"],
+    ))
+    _nfb_result_for_exposure = build_non_fund_based_limit(NonFundBasedInputs(
+        annual_imports=st.session_state["nfb_annual_imports"],
+        peak_lc_requirement=st.session_state["nfb_peak_lc"],
+        contractual_obligations=st.session_state["nfb_contractual_obligations"],
+        peak_bg_requirement=st.session_state["nfb_peak_bg"],
+    ))
+
+    exposure = build_proposed_exposure(
+        requested_amount=_requested_amount,
+        recommended_limit=_recommended_limit,
+        sanctioned_override=st.session_state.get("deal_sanctioned_override"),
+        fb_requirement=_fb_result_for_exposure.fb_requirement,
+        nfb_commitment=_nfb_result_for_exposure.assessed_nfb_limit,
+    )
 
 if d is not None:
     crumb = (
@@ -530,6 +662,8 @@ UPLOAD_STAGES = [
     ("ocr", "OCR Extraction"),
     ("extraction", "Financial Data Extraction"),
     ("population", "Data Population"),
+    ("ai_validation", "AI Validation"),
+    ("ai_correction", "Correction Proposals"),
 ]
 
 _UPLOAD_STAGE_DISPLAY = {
@@ -537,6 +671,10 @@ _UPLOAD_STAGE_DISPLAY = {
     "reused": ("✓ Previously Extracted", "good"),
     "processing": ("⟳ Processing", "processing"),
     "failed": ("✕ Failed", "critical"),
+    # AI validation only - Ollama not running/model not installed for
+    # this run. Never a failure: the deterministic pipeline above is
+    # unaffected either way (see ai_validation.py).
+    "skipped": ("○ Skipped (Ollama unavailable)", "neutral"),
 }
 
 
@@ -685,6 +823,7 @@ if selected_area == AREAS[0]:
             st.session_state["pdf_processing_error"] = None
             st.session_state["pdf_processing_failed_stage"] = None
             _reset_fb_nfb_session_state()
+            _reset_deal_session_state()
 
             os.makedirs(ocr_upload.UPLOAD_WORK_DIR, exist_ok=True)
             _safe_id = _pdf_upload_id.replace(":", "_").replace("/", "_").replace("\\", "_")
@@ -720,6 +859,18 @@ if selected_area == AREAS[0]:
                     st.session_state["extraction_status_counts"] = _result["status_counts"]
                     st.session_state["extraction_total_fields"] = _result["total_fields"]
                     st.session_state["ocr_reused"] = _result["ocr_reused"]
+                    st.session_state["ai_validation_results"] = _result["ai_validation_results"]
+                    st.session_state["ai_presence_results"] = _result["ai_presence_results"]
+                    st.session_state["ai_validation_available"] = _result["ai_validation_available"]
+                    st.session_state["ai_validation_detail"] = _result["ai_validation_detail"]
+                    st.session_state["ai_technical_counts"] = _result["ai_technical_counts"]
+                    st.session_state["ai_validation_counts"] = _result["ai_validation_counts"]
+                    st.session_state["ai_presence_counts"] = _result["ai_presence_counts"]
+                    st.session_state["correction_proposals"] = _result["correction_proposals"]
+                    st.session_state["correction_available"] = _result["correction_available"]
+                    st.session_state["correction_detail"] = _result["correction_detail"]
+                    st.session_state["correction_technical_counts"] = _result["correction_technical_counts"]
+                    st.session_state["correction_proposal_counts"] = _result["correction_proposal_counts"]
                     st.session_state["source_mode"] = "pdf"
                     _status.update(label="Processing complete", state="complete")
                 except Exception as exc:
@@ -779,6 +930,128 @@ if selected_area == AREAS[0]:
             f"{_counts.get('NOT_FOUND_IN_OCR', 0)} not present in the source document, "
             f"{_counts.get('AMBIGUOUS', 0)} withheld as ambiguous (see Input & Validation)."
         )
+
+        # ---- AI-Assisted Validation ---------------------------------------
+        render_section(
+            "AI-Assisted Validation",
+            "A local Ollama model reviews each extracted field against its own source text "
+            "and flags possible year, field, or value mismatches - advisory only, it never "
+            "changes the extracted values above or any downstream calculation.",
+        )
+        _ai_results = st.session_state.get("ai_validation_results") or {}
+        _ai_presence_results = st.session_state.get("ai_presence_results") or {}
+        _ai_technical_counts = st.session_state.get("ai_technical_counts") or {}
+        _ai_validation_counts = st.session_state.get("ai_validation_counts") or {}
+        _ai_presence_counts = st.session_state.get("ai_presence_counts") or {}
+        if not st.session_state.get("ai_validation_available"):
+            st.caption(
+                f"AI validation did not run for this upload — "
+                f"{st.session_state.get('ai_validation_detail') or 'Ollama is unavailable.'} "
+                "The deterministic extraction above is unaffected."
+            )
+        else:
+            st.caption(
+                f"Of {len(_ai_results)} fields with a deterministic value: {_ai_technical_counts.get('AI_COMPLETED', 0)} validated, "
+                f"{_ai_technical_counts.get('AI_SKIPPED', 0)} skipped (time budget exhausted), "
+                f"{_ai_technical_counts.get('AI_ERROR', 0)} could not be validated (technical error). "
+                f"Of those validated: {_ai_validation_counts.get('CONFIRMED', 0)} confirmed, "
+                f"{_ai_validation_counts.get('YEAR_MISMATCH', 0)} year mismatches, "
+                f"{_ai_validation_counts.get('FIELD_MISMATCH', 0)} field mismatches, "
+                f"{_ai_validation_counts.get('VALUE_SUSPICIOUS', 0)} suspicious values, "
+                f"{_ai_validation_counts.get('NOT_FOUND_IN_SOURCE', 0)} not found in source, "
+                f"{_ai_validation_counts.get('INSUFFICIENT_CONTEXT', 0)} with insufficient context."
+            )
+            if _ai_presence_results:
+                st.caption(
+                    f"Additionally, {len(_ai_presence_results)} fields the deterministic pipeline "
+                    f"could not locate at all were checked for a possible match under different "
+                    f"wording (never a proposed value): "
+                    f"{_ai_presence_counts.get('FOUND_POSSIBLE_MATCH', 0)} possible match found, "
+                    f"{_ai_presence_counts.get('NOT_FOUND_IN_SOURCE', 0)} confirmed not present, "
+                    f"{_ai_presence_counts.get('INSUFFICIENT_CONTEXT', 0)} insufficient context."
+                )
+            _ai_review_rows = [
+                {
+                    "Field": r.field,
+                    "AI Status": r.validation_status or r.technical_status,
+                    "Confidence": f"{r.confidence:.0%}" if r.confidence is not None else "—",
+                    "Explanation": r.explanation or "—",
+                    "Source Line": r.source_line_number if r.source_line_number is not None else "—",
+                }
+                for r in _ai_results.values()
+                if r.requires_review or r.technical_status == "AI_ERROR"
+            ]
+            if _ai_review_rows:
+                with st.expander(f"Fields flagged for review ({len(_ai_review_rows)})", expanded=False):
+                    render_html_table(
+                        _ai_review_rows,
+                        columns=["Field", "AI Status", "Confidence", "Explanation", "Source Line"],
+                        badge_col="AI Status",
+                    )
+            else:
+                st.caption("No fields were flagged for review.")
+
+        # ---- AI Mapping Correction Proposals --------------------------------
+        render_section(
+            "AI Mapping Correction Proposals",
+            "For fields already flagged above (or flagged as ambiguous by the deterministic pipeline "
+            "itself), the same local model may suggest an alternative row/column mapping - advisory "
+            "only, never applied automatically. Every suggestion is re-checked against the real "
+            "source text in Python before being shown here.",
+        )
+        _correction_proposals = st.session_state.get("correction_proposals") or {}
+        _correction_technical_counts = st.session_state.get("correction_technical_counts") or {}
+        _correction_proposal_counts = st.session_state.get("correction_proposal_counts") or {}
+        if not _correction_proposals:
+            st.caption("No fields required a correction-proposal attempt (nothing was flagged for review).")
+        elif not st.session_state.get("correction_available"):
+            st.caption(
+                f"Correction-proposal generation did not run for this upload — "
+                f"{st.session_state.get('correction_detail') or 'Ollama is unavailable.'} "
+                "Existing AI validation results above are unaffected."
+            )
+        else:
+            st.caption(
+                f"Of {len(_correction_proposals)} flagged field(s): "
+                f"{_correction_technical_counts.get('AI_COMPLETED', 0)} attempted, "
+                f"{_correction_technical_counts.get('AI_SKIPPED', 0)} skipped (time budget exhausted), "
+                f"{_correction_technical_counts.get('AI_ERROR', 0)} could not be attempted (technical error). "
+                f"Of those attempted: {_correction_proposal_counts.get('PROPOSAL_AVAILABLE', 0)} verified proposals, "
+                f"{_correction_proposal_counts.get('PROPOSAL_UNVERIFIED', 0)} unverified, "
+                f"{_correction_proposal_counts.get('PROPOSAL_REJECTED_BY_EVIDENCE', 0)} rejected by evidence, "
+                f"{_correction_proposal_counts.get('NO_PROPOSAL', 0)} no better mapping found, "
+                f"{_correction_proposal_counts.get('INSUFFICIENT_CONTEXT', 0)} insufficient context."
+            )
+            _shown_proposals = [
+                p for p in _correction_proposals.values()
+                if p.proposal_status in ("PROPOSAL_AVAILABLE", "PROPOSAL_UNVERIFIED")
+            ]
+            if _shown_proposals:
+                with st.expander(f"Correction proposals ({len(_shown_proposals)})", expanded=False):
+                    for p in _shown_proposals:
+                        st.markdown(badge_html("ADVISORY — REQUIRES REVIEW", "warning"), unsafe_allow_html=True)
+                        st.markdown(f"**Field: {p.field}**  ·  _{p.trigger_reason}_")
+                        col_orig, col_proposed = st.columns(2)
+                        with col_orig:
+                            st.markdown("**Current mapping**")
+                            st.markdown(f"FY current → {fmt_money(p.original_value_current)}")
+                            st.markdown(f"FY previous → {fmt_money(p.original_value_previous)}")
+                            st.caption(f"Source: line {p.original_source_line_number}")
+                            st.code(p.original_source_text or "—")
+                        with col_proposed:
+                            st.markdown("**AI-suggested mapping**")
+                            st.markdown(f"{p.proposed_column_current_label or '—'} → {fmt_money(p.proposed_value_current)}")
+                            st.markdown(f"{p.proposed_column_previous_label or '—'} → {fmt_money(p.proposed_value_previous)}")
+                            st.caption(f"Suggested source: line {p.proposed_source_line_number}")
+                            st.code(p.proposed_source_text or "—")
+                        st.caption(f"Reason: {p.reason}")
+                        _checklist = "✓ Source line verified · ✓ Value found in OCR source · ✓ Fiscal-year column verified"
+                        if p.proposal_status == "PROPOSAL_UNVERIFIED":
+                            _checklist += " · ✗ Supporting evidence citations could not be verified"
+                        st.caption(_checklist)
+                        st.markdown("---")
+            else:
+                st.caption("No verified correction proposals for this document.")
 
         # ---- Extracted Financial Data -----------------------------------
         render_section("Extracted Financial Data")
@@ -981,6 +1254,7 @@ elif selected_area == AREAS[1]:
     m = compute_derived_metrics(d)
     checks = run_validation_checks(d, m)
     checks_by_cell = {c.cell: c for c in checks}
+    completeness = compute_data_completeness(d, m)
 
     total_checks = len(checks)
     passed_checks = sum(1 for c in checks if c.result in ("PASS", "PASS - ties"))
@@ -994,11 +1268,27 @@ elif selected_area == AREAS[1]:
     )
     st.markdown("<br>", unsafe_allow_html=True)
 
+    # Genuinely computed from this document's own extracted fields (see
+    # input_data_engine.compute_data_completeness) - never hardcoded.
+    # Missing a CRITICAL field (Revenue, Net Profit, Total Assets, ...)
+    # is called out by name and shown critical/red; missing only an
+    # IMPORTANT field is shown as a warning; only when every tracked
+    # field is present does this show good/green.
+    if completeness.missing_critical:
+        completeness_sublabel = f"Missing critical: {', '.join(completeness.missing_critical)}"
+        completeness_icon, completeness_kind = "!", "critical"
+    elif completeness.missing_important:
+        completeness_sublabel = f"Missing: {', '.join(completeness.missing_important)}"
+        completeness_icon, completeness_kind = "!", "warning"
+    else:
+        completeness_sublabel = "All critical and important fields present"
+        completeness_icon, completeness_kind = "✓", "good"
+
     render_kpi_row([
         kpi_card_html(
-            "Data Completeness", "100%",
-            sublabel="All required fields loaded from the reference workbook",
-            icon="✓", icon_kind="good",
+            "Data Completeness", f"{completeness.overall_pct:.0f}%",
+            sublabel=completeness_sublabel,
+            icon=completeness_icon, icon_kind=completeness_kind,
         ),
         kpi_card_html(
             "Validation Checks", f"{passed_checks} / {total_checks}",
@@ -1609,11 +1899,38 @@ elif selected_area == AREAS[4]:
             kpi_card_html("Assumed Debt Exposure", fmt_money_cr(collateral.debt_exposure),
                           sublabel="= Total Debt, from Input Data (frozen)"),
             kpi_card_html(
-                "Collateral Coverage Ratio",
+                "Existing Coverage Ratio",
                 f"{collateral.coverage_ratio:.2f}x" if collateral.coverage_ratio is not None else "Not Available",
-                sublabel="Total Adjusted / Debt Exposure",
+                sublabel="Total Adjusted / Existing Total Debt — unchanged, as-is basis",
             ),
         ], columns_per_row=3)
+
+        render_section(
+            "Post-Sanction Coverage",
+            f"Pro-forma coverage after the proposed term facility is added on top of existing debt. "
+            f"Basis: {POST_SANCTION_BASIS_LABEL}. Deliberately excludes FB/NFB - this fixed-asset "
+            f"schedule conventionally secures the TERM facility only; working-capital and "
+            f"non-fund-based exposure are typically secured separately (hypothecation of stock/"
+            f"receivables), a different collateral pool this application does not model.",
+        )
+        if exposure is not None:
+            post_sanction = compute_post_sanction_coverage(
+                collateral, exposure.term_facility_exposure, collateral_inputs.rating_bands
+            )
+            st.markdown(badge_html(post_sanction.rating, status_kind(post_sanction.rating)), unsafe_allow_html=True)
+            render_kpi_row([
+                kpi_card_html("Existing Total Debt", fmt_money_cr(collateral.debt_exposure)),
+                kpi_card_html("+ Term Facility Exposure", fmt_money_cr(exposure.term_facility_exposure),
+                              sublabel="Sanctioned Amount — see Limit Setting"),
+                kpi_card_html("Post-Sanction Exposure", fmt_money_cr(post_sanction.post_sanction_exposure),
+                              sublabel=post_sanction.basis_label),
+                kpi_card_html(
+                    "Post-Sanction Coverage Ratio",
+                    f"{post_sanction.coverage_ratio:.2f}x" if post_sanction.coverage_ratio is not None else "Not Available",
+                ),
+            ], columns_per_row=4)
+        else:
+            st.markdown(badge_html("Not Available / Requires Review", "neutral"), unsafe_allow_html=True)
 
         render_section("Collateral Schedule", "Book values and haircuts are entity-specific reference data read directly from the active workbook - not derivable from '1-Input Data'.")
         collateral_rows = [
@@ -1649,11 +1966,17 @@ elif selected_area == AREAS[4]:
             render_html_table(typical_rows, columns=["Collateral Type", "Typical Haircut"])
 
         with st.expander("Reference: collateral coverage rating bands"):
+            # Column header says "(%)" explicitly - the band labels
+            # themselves (">125", "100-125", "<100") are read verbatim
+            # from the reference workbook and are percentage cut-points,
+            # the same unit the KPI above already shows alongside the
+            # "x" multiple (e.g. "2.05x (~205%)") - never rescaled or
+            # retyped here, just labelled unambiguously.
             band_rows = [
-                {"Coverage Ratio": label, "Interpretation": interp, "Credit View": view}
+                {"Coverage Ratio (%)": label, "Interpretation": interp, "Credit View": view}
                 for label, interp, view in collateral_inputs.rating_bands
             ]
-            render_html_table(band_rows, columns=["Coverage Ratio", "Interpretation", "Credit View"])
+            render_html_table(band_rows, columns=["Coverage Ratio (%)", "Interpretation", "Credit View"])
 
     render_stage_nav(4, "Accept & Continue →")
 
@@ -1673,6 +1996,26 @@ elif selected_area == AREAS[5]:
     )
 
     limit_policy = load_limit_setting_policy(bundle.workbook_path)
+    _limit_using_pdf = st.session_state.get("source_mode") == "pdf"
+
+    if _limit_using_pdf:
+        render_section(
+            "Deal Parameters",
+            "Analyst-entered, per deal - '6-Limit Setting'!B4 in the reference workbook is a fixed "
+            "constant (the same figure for every borrower ever uploaded); this replaces it with this "
+            "specific deal's own requested amount.",
+        )
+        _persistent_number_input(
+            "Requested Amount (₹ Cr)", "deal_requested_amount", min_value=0.0, step=100.0,
+            help="Prefilled once from the reference workbook's own default figure - editable per deal.",
+        )
+        st.caption("Analyst-entered — replaces the reference workbook's fixed B4 constant for this deal.")
+        requested_amount_for_page = st.session_state["deal_requested_amount"]
+    else:
+        # Advanced/uploaded-workbook mode - unchanged: this workbook's own
+        # B4 is a genuinely independent, analyst-supplied figure for this
+        # specific workbook, never overridden by session-state.
+        requested_amount_for_page = limit_policy.requested_amount
 
     # build_limit_setting() (frozen) divides by both EBIT and reported
     # DSCR with no None-guard - correct, since the reference workbook it
@@ -1682,14 +2025,21 @@ elif selected_area == AREAS[5]:
     # before the call, rather than inside the frozen module - this
     # entire page's math is one interconnected chain with no meaningful
     # partial result once EBIT is unavailable.
+    recommended_limit_for_page = None
     if fa.derived.ebit.current is None or d.reported_dscr.current is None:
         st.info(
             "Limit Setting is not available for this document: it requires EBIT (derived from "
             "Interest Income, which this document does not separately report in the P&L) and "
             "the reported DSCR."
         )
+    elif requested_amount_for_page is None:
+        st.info("Enter a Requested Amount above to compute the recommended limit for this deal.")
     else:
-        limit_result = build_limit_setting(limit_policy, fa.derived.ebit.current, d.reported_dscr.current)
+        limit_result = build_limit_setting(
+            _dc_replace(limit_policy, requested_amount=requested_amount_for_page),
+            fa.derived.ebit.current, d.reported_dscr.current,
+        )
+        recommended_limit_for_page = limit_result.recommended_limit
 
         conclusion_text = limit_result.conclusion if isinstance(limit_result.conclusion, str) else "FALSE (uncapped case not defined by the reference workbook)"
         conclusion_kind = "good" if limit_result.conclusion == "PASS" else "warning"
@@ -1701,9 +2051,13 @@ elif selected_area == AREAS[5]:
         )
         st.markdown("<br>", unsafe_allow_html=True)
 
-        render_section("Proposed Facility", "Deal parameters - policy/analyst inputs read from the reference workbook.")
+        render_section(
+            "Proposed Facility",
+            "Deal parameters - analyst-entered Requested Amount (PDF-upload mode) or the reference "
+            "workbook's own policy inputs (Advanced mode) for Interest Rate / Tenor.",
+        )
         render_kpi_row([
-            kpi_card_html("Requested Amount", fmt_money_cr(limit_policy.requested_amount)),
+            kpi_card_html("Requested Amount", fmt_money_cr(requested_amount_for_page)),
             kpi_card_html("Interest Rate", f"{limit_policy.interest_rate:.1%} p.a."),
             kpi_card_html("Tenor", f"{limit_policy.tenor_years} years"),
             kpi_card_html("Annual Instalment", fmt_money_cr(limit_result.annual_instalment), sublabel="Annuity: PMT(rate, tenor, amount)"),
@@ -1760,7 +2114,7 @@ elif selected_area == AREAS[5]:
         chart_caption("Requested amount vs capacity cap vs recommended limit (₹ crore)")
         fig = magnitude_bar(
             ["(a) Requested amount", "(b) Capacity cap", "Recommended limit = MIN(a, b)"],
-            [limit_policy.requested_amount, limit_result.capacity_cap, limit_result.recommended_limit],
+            [requested_amount_for_page, limit_result.capacity_cap, limit_result.recommended_limit],
             value_fmt="₹{:,.0f}", sort_desc=False,
         )
         st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
@@ -1864,6 +2218,69 @@ elif selected_area == AREAS[5]:
         "score is estimated in its place."
     )
 
+    render_section(
+        "Sanctioned Amount",
+        "Optional override of the Recommended Limit above - use only if the credit committee "
+        "approved a different amount for the term facility. Leave blank to use the Recommended "
+        "Limit as computed.",
+    )
+    _persistent_number_input(
+        "Sanctioned Amount (₹ Cr) — optional override", "deal_sanctioned_override", min_value=0.0, step=100.0,
+        help="Leave blank to use the Recommended Limit computed above.",
+    )
+    if st.session_state.get("deal_sanctioned_override") is not None:
+        st.caption("Analyst override in effect — Sanctioned Amount differs from the computed Recommended Limit above.")
+    else:
+        st.caption("No override entered — Sanctioned Amount = Recommended Limit.")
+
+    # Built FRESH here, from this SAME run's own already-instantiated
+    # widgets (Requested Amount / FB / NFB / Sanctioned Amount all render
+    # earlier on this exact page, above) - deliberately NOT the centrally-
+    # computed `exposure` used by every OTHER page. That central value is
+    # read from session_state BEFORE this page's own widgets re-commit
+    # their just-changed values in this run (see the PROPOSED EXPOSURE
+    # block near the top of this file), so on THIS page specifically it
+    # would lag one rerun behind whatever the analyst just typed - a real,
+    # confirmed staleness bug caught by test_streamlit_smoke.py's own
+    # "change one FB input, confirm the old figure is gone" check.
+    # Portfolio Monitoring/Collateral Assessment/Credit Memo never render
+    # in the same script execution as this page's widgets (mutually
+    # exclusive `elif` branches), so they never see this lag - only this
+    # page needs its own freshly-built copy.
+    page_exposure = build_proposed_exposure(
+        requested_amount=requested_amount_for_page,
+        recommended_limit=recommended_limit_for_page,
+        sanctioned_override=st.session_state.get("deal_sanctioned_override"),
+        fb_requirement=fb_result.fb_requirement,
+        nfb_commitment=nfb_result.assessed_nfb_limit,
+    )
+
+    render_section(
+        "Proposed Exposure Summary",
+        "The single set of exposure figures Portfolio Monitoring, Collateral Assessment and "
+        "Credit Memo all read from (see proposed_exposure.py) - kept as clearly distinct figures, "
+        "not one blended total.",
+    )
+    render_kpi_row([
+        kpi_card_html("Requested Amount", fmt_money_cr(page_exposure.requested_amount)),
+        kpi_card_html("Recommended Limit", fmt_money_cr(page_exposure.recommended_limit), sublabel="MIN(Requested, Capacity Cap)"),
+        kpi_card_html("Sanctioned Amount", fmt_money_cr(page_exposure.sanctioned_amount), sublabel="= Recommended Limit unless overridden above"),
+    ], columns_per_row=3)
+    render_kpi_row([
+        kpi_card_html("Term Facility Exposure", fmt_money_cr(page_exposure.term_facility_exposure), sublabel="= Sanctioned Amount"),
+        kpi_card_html("FB Requirement", fmt_money_cr_or_review(page_exposure.fb_requirement)),
+        kpi_card_html("Proposed Funded Exposure", fmt_money_cr_or_review(page_exposure.proposed_funded_exposure), sublabel="Term Facility + FB"),
+    ], columns_per_row=3)
+    render_kpi_row([
+        kpi_card_html("NFB Commitment", fmt_money_cr_or_review(page_exposure.nfb_commitment), sublabel="Contingent, off-balance-sheet — kept separate"),
+        kpi_card_html("Total Proposed Commitment", fmt_money_cr_or_review(page_exposure.total_proposed_commitment), sublabel="Proposed Funded Exposure + NFB Commitment"),
+    ], columns_per_row=2)
+    st.caption(
+        "Total Proposed Commitment (Funded + NFB, undiscounted) feeds Portfolio Monitoring's "
+        "concentration calculation in PDF-upload mode - NFB is a contingent, off-balance-sheet "
+        "commitment and is never treated as identical to funded/outstanding exposure."
+    )
+
     render_stage_nav(5, "Accept Limits & Continue →")
 
 
@@ -1883,6 +2300,25 @@ elif selected_area == AREAS[6]:
     )
 
     portfolio_inputs = load_portfolio_inputs(bundle.workbook_path)
+    _portfolio_reconciliation = None
+
+    if portfolio_inputs is not None:
+        _original_portfolio_proposed_amount = portfolio_inputs.proposed_loan_amount
+        if exposure is not None:
+            _portfolio_reconciliation = check_exposure_reconciliation(exposure, _original_portfolio_proposed_amount)
+        if (
+            st.session_state.get("source_mode") == "pdf"
+            and exposure is not None
+            and exposure.total_proposed_commitment is not None
+        ):
+            # PDF-upload mode: replaces the reference workbook's own fixed
+            # C11 constant (identical for every borrower ever uploaded -
+            # see this module's own docstring) with this deal's actual
+            # Total Proposed Commitment (Term Facility + FB Requirement +
+            # NFB Commitment - see proposed_exposure.py). Advanced/
+            # uploaded-workbook mode is untouched below: that workbook's
+            # own C11 is a genuinely independent, analyst-supplied figure.
+            portfolio_inputs = _dc_replace(portfolio_inputs, proposed_loan_amount=exposure.total_proposed_commitment)
 
     if portfolio_inputs is None:
         st.markdown(badge_html("Unavailable", "neutral"), unsafe_allow_html=True)
@@ -1915,11 +2351,34 @@ elif selected_area == AREAS[6]:
             kpi_card_html("Number of Accounts", f"{portfolio_inputs.number_of_accounts:,}"),
             kpi_card_html("Average Exposure / Account", fmt_money_cr(portfolio.average_exposure_per_account)),
         ], columns_per_row=4)
+        # Concentration below is explicitly based on TOTAL PROPOSED
+        # COMMITMENT (Term Facility + FB Requirement + NFB Commitment,
+        # undiscounted) in PDF-upload mode - single-borrower concentration
+        # risk is about the lender's full commitment to one borrower, not
+        # just the funded piece. NFB (contingent, off-balance-sheet LCs/
+        # BGs) is never silently treated as identical to funded exposure -
+        # the Proposed Funded Exposure figure (Term + FB only) is shown
+        # alongside for comparison, not folded into one blended number.
+        _portfolio_using_pdf_display = st.session_state.get("source_mode") == "pdf"
         render_kpi_row([
-            kpi_card_html("Proposed Loan Amount", fmt_money_cr(portfolio_inputs.proposed_loan_amount)),
+            kpi_card_html(
+                "Proposed Loan Amount", fmt_money_cr(portfolio_inputs.proposed_loan_amount),
+                sublabel=(
+                    "= Total Proposed Commitment (Funded + NFB)" if _portfolio_using_pdf_display
+                    else "Read from the active workbook's own '8-Portfolio Monitoring'!C11"
+                ),
+            ),
+            kpi_card_html(
+                "Proposed Funded Exposure (reference)",
+                fmt_money_cr(exposure.proposed_funded_exposure) if exposure is not None else "Not Available / Requires Review",
+                sublabel="Term Facility + FB only — NOT used for concentration below",
+            ),
             kpi_card_html("Gross NPL", fmt_money_cr(portfolio_inputs.gross_npl)),
             kpi_card_html("Portfolio Exposure Post-Sanction", fmt_money_cr(portfolio.portfolio_exposure_post_sanction)),
-        ], columns_per_row=3)
+        ], columns_per_row=4)
+
+        if _portfolio_reconciliation is not None:
+            st.caption(f"**Exposure reconciliation:** {_portfolio_reconciliation.status} — {_portfolio_reconciliation.note}")
 
         render_section("Risk Criteria")
         criteria_rows = [
@@ -2009,6 +2468,21 @@ elif selected_area == AREAS[7]:
     )
 
     cm9_portfolio_inputs = load_portfolio_inputs(bundle.workbook_path)
+    cm9_reconciliation = None
+    if cm9_portfolio_inputs is not None:
+        _cm9_original_portfolio_proposed_amount = cm9_portfolio_inputs.proposed_loan_amount
+        if exposure is not None:
+            cm9_reconciliation = check_exposure_reconciliation(exposure, _cm9_original_portfolio_proposed_amount)
+        # Same PDF-mode substitution as the Portfolio Monitoring page
+        # itself (see AREAS[6] above) - Credit Memo must reflect the same
+        # Total Proposed Commitment, not independently re-derive a
+        # different figure.
+        if (
+            st.session_state.get("source_mode") == "pdf"
+            and exposure is not None
+            and exposure.total_proposed_commitment is not None
+        ):
+            cm9_portfolio_inputs = _dc_replace(cm9_portfolio_inputs, proposed_loan_amount=exposure.total_proposed_commitment)
     cm9_portfolio = build_portfolio_monitoring(cm9_portfolio_inputs) if cm9_portfolio_inputs else None
 
     # Same analyst-entered FB/NFB inputs as the Limit Setting page (see
@@ -2040,6 +2514,28 @@ elif selected_area == AREAS[7]:
     render_section("Area Status Summary")
     status_rows = [{"Area": a.area_label, "Status": a.status if isinstance(a.status, str) else str(a.status)} for a in memo.areas]
     render_html_table(status_rows, columns=["Area", "Status"], badge_col="Status")
+
+    render_section(
+        "Proposed Exposure Summary",
+        "Every relevant exposure figure shown separately, so the composition of the total "
+        "commitment is never hidden behind one blended number - see proposed_exposure.py.",
+    )
+    if exposure is not None:
+        exposure_rows = [
+            {"Figure": "Requested Amount", "Value": fmt_money_cr(exposure.requested_amount), "Basis": "Analyst's ask for the term facility"},
+            {"Figure": "Recommended Limit", "Value": fmt_money_cr(exposure.recommended_limit), "Basis": "MIN(Requested Amount, Capacity Cap)"},
+            {"Figure": "Sanctioned Amount", "Value": fmt_money_cr(exposure.sanctioned_amount), "Basis": "= Recommended Limit unless analyst-overridden"},
+            {"Figure": "Term Facility Exposure", "Value": fmt_money_cr(exposure.term_facility_exposure), "Basis": "= Sanctioned Amount"},
+            {"Figure": "FB Requirement", "Value": fmt_money_cr_or_review(exposure.fb_requirement), "Basis": "Fund-Based working-capital assessment"},
+            {"Figure": "Proposed Funded Exposure", "Value": fmt_money_cr_or_review(exposure.proposed_funded_exposure), "Basis": "Term Facility Exposure + FB Requirement"},
+            {"Figure": "NFB Commitment", "Value": fmt_money_cr_or_review(exposure.nfb_commitment), "Basis": "Contingent, off-balance-sheet (LC/BG) — kept separate"},
+            {"Figure": "Total Proposed Commitment", "Value": fmt_money_cr_or_review(exposure.total_proposed_commitment), "Basis": "Proposed Funded Exposure + NFB Commitment"},
+        ]
+        render_html_table(exposure_rows, columns=["Figure", "Value", "Basis"])
+        if cm9_reconciliation is not None:
+            st.caption(f"**Exposure reconciliation (vs Portfolio Monitoring):** {cm9_reconciliation.status} — {cm9_reconciliation.note}")
+    else:
+        st.markdown(badge_html("Not Available / Requires Review", "neutral"), unsafe_allow_html=True)
 
     render_section(
         "Reference Commentary",

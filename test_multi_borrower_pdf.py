@@ -26,26 +26,44 @@ Three "documents" are run through that real pipeline:
                specific disclosure requirement.
   Borrower D = the REAL Tata Chemicals filing's own OCR text (cached on
                this machine from manual testing - skipped if unavailable).
-               Its P&L and Cash Flow tables print the numbers-line before
-               the label-line (the opposite of Tata Steel's layout), so
-               this pipeline cannot locate Revenue, Total Expenses,
-               Operating Cash Flow, or the Reported Ratios block for it at
-               all - the exact real-world case that used to crash the
-               whole app with `TypeError: unsupported operand type(s) for
-               +: 'NoneType' and 'NoneType'` in compute_derived_metrics()
-               (None + None from Revenue + Other Income). Most Balance
-               Sheet fields DO extract correctly for this document (that
-               table's layout uses the SAME "numbers precede label" style
-               throughout), proving genuinely available fields still
-               populate rather than the whole document degrading to "Not
-               Available" across the board. Also regression-guards the
-               follow-up fix for four Balance Sheet fields (PP&E, Current
-               Investments, Cash, Current Liabilities) that used to
-               silently extract a NEIGHBOURING line's value instead of
-               their own (ocr_pipeline.locate_field's lookahead used to
-               scan forward before backward, and never recognised an
-               untracked neighbouring line - e.g. Trade Receivables, Bank
-               Balances - as belonging to someone else).
+               Manual validation against this real document (Phase 1 of
+               the extraction/completeness audit) found Revenue, Total
+               Expenses, Operating Cash Flow and the entire Reported
+               Ratios block (DSCR/ISCR/Current Ratio/Debt-Equity/Net
+               Worth/Net Profit Margin) reporting NOT FOUND despite being
+               present in the OCR text - root-caused to the section-
+               heading regex matching inside ordinary auditor's-report
+               prose ("...risks of material misSTATEMENT OF the...
+               financial results...") and anchoring the wrong section
+               boundary before the real table, plus the P&L's own
+               Segment-wise disclosure being silently absorbed into the
+               same section as the real P&L table. Both are fixed (see
+               ocr_pipeline.SECTION_HEADING_PATTERNS / _merge_adjacent_
+               same_heading / the "SEGMENT" boundary type) - this test now
+               asserts those fields DO populate with this document's own
+               real figures. The same audit also found Current Borrowings
+               (₹481 crore) corrupted to ₹4.81 crore by a sibling-
+               magnitude "repair" heuristic that guessed a /100 scaling
+               error from comparing it to a different year's value, and
+               Cash's lone reported figure (₹30 crore, genuinely the
+               FY-previous column with FY-current blank/nil) wrongly
+               assigned to FY-current - both fixed via, respectively,
+               repair_ocr_decimal_defect() (a per-token, comma-shape-only
+               repair that never compares to another value) and real
+               column-position calibration (see "YEAR-COLUMN ALIGNMENT"
+               in ocr_pipeline.py). Most Balance Sheet fields already
+               extracted correctly for this document even before that
+               work, proving genuinely available fields populate rather
+               than the whole document degrading to "Not Available" -
+               regression-guarded below alongside the newer fixes. Also
+               regression-guards the follow-up fix for four Balance
+               Sheet fields (PP&E, Current Investments, Cash, Current
+               Liabilities) that used to silently extract a NEIGHBOURING
+               line's value instead of their own (ocr_pipeline.
+               locate_field's lookahead used to scan forward before
+               backward, and never recognised an untracked neighbouring
+               line - e.g. Trade Receivables, Bank Balances - as
+               belonging to someone else).
 
 This proves, through the real merge path:
   1. No crash for any of the three documents, on any page.
@@ -303,8 +321,8 @@ def main():
         if text_d is not None:
             print()
             print("=" * 100)
-            print("6b. BORROWER D (TATA CHEMICALS): AVAILABLE FIELDS POPULATE, UNAVAILABLE ONES")
-            print("    SHOW 'NOT AVAILABLE' - NEVER A CRASH, NEVER A GUESS, NEVER TATA STEEL'S DATA")
+            print("6b. BORROWER D (TATA CHEMICALS): PHASE 1 EXTRACTION FIXES - REVENUE, OCF, THE")
+            print("    REPORTED RATIOS BLOCK AND CURRENT BORROWINGS NOW POPULATE CORRECTLY")
             print("=" * 100)
             iv_d = text_d["2. Input & Validation"]
             fa_d = text_d["3. Financial Analysis"]
@@ -326,19 +344,66 @@ def main():
             _ok("473.00" not in iv_d, "Borrower D: PP&E does not show Capital Work-in-Progress's value (473)")
             _ok("209.00" in iv_d, "Borrower D: Current Investments shows its own correct value (209), not Trade Receivables' (252)")
             _ok("252.00" not in iv_d, "Borrower D: Current Investments does not show Trade Receivables' value (252)")
-            _ok("30.00" in iv_d, "Borrower D: Cash shows its own correct value (30), not Bank Balances' (37)")
+            _ok("30.00" in iv_d, "Borrower D: Cash shows its own correct value (30, FY-previous column), not Bank Balances' (37)")
             _ok("37.00" not in iv_d, "Borrower D: Cash does not show Bank Balances' value (37)")
             _ok("1,370.00" in iv_d, "Borrower D: Current Liabilities shows the Total Current Liabilities figure (1,370), not the 'Other Current Liabilities' sub-line's (105)")
             _ok("105.00" not in iv_d, "Borrower D: Current Liabilities does not show 'Other Current Liabilities' sub-line's value (105)")
-            # Revenue/Total Expenses/Operating Cash Flow/the whole Reported
-            # Ratios block genuinely could not be located in this document's
-            # OCR text (P&L/Cash Flow numbers-before-label layout - see the
-            # module docstring) - "Not Available", not a crash, not a guess.
-            _ok("Not Available" in fa_d, "Borrower D: Financial Analysis shows 'Not Available' for the P&L/Ratio lines this pipeline could not locate")
+
+            # Phase 1 extraction-audit regression guards - the two
+            # concretely reported mapping bugs.
+            # Current Borrowings: FY2026=12, FY2025=481 (a real ~40x
+            # paydown) - the sibling-magnitude "repair" heuristic used to
+            # mangle 481 into 4.81 because it looked "too different" from
+            # 12; repair_ocr_decimal_defect() (comma-shape-only, never a
+            # sibling comparison) leaves a clean "481" untouched.
+            _ok("481.00" in iv_d, "Borrower D: Current Borrowings FY-previous shows its real value (481), not corrupted by the old sibling-magnitude heuristic")
+            _ok("12.00" in iv_d, "Borrower D: Current Borrowings FY-current shows its real value (12)")
+            _ok("4.81" not in iv_d, "Borrower D: Current Borrowings is NOT corrupted to 4.81 (the reported /100 scaling bug)")
+
+            # Revenue, Total Expenses and Operating Cash Flow used to
+            # report NOT FOUND (false-positive section-heading match on
+            # ordinary auditor's-report prose - see the module docstring)
+            # despite being present in the OCR text a few lines later; now
+            # populate with this document's own real figures.
+            _ok("4,831" in fa_d and "4,441" in fa_d, "Borrower D: Revenue (4,831 / 4,441, this document's own real figures) populates in Financial Analysis")
+            _ok("4,524" in iv_d or "4,524" in fa_d, "Borrower D: Total Expenses (4,524) populates")
+            _ok("1,119" in fa_d, "Borrower D: Operating Cash Flow (1,119) populates in Financial Analysis")
+
+            # The entire Reported Ratios block used to report NOT FOUND
+            # for the same false-positive-section-heading reason (plus a
+            # second false match swallowing the P&L section's segment-wise
+            # breakdown) - now populates with this document's own real
+            # ratios.
+            _ok("5.21x" in fa_d, "Borrower D: DSCR (5.21x, this document's own real figure) populates in Financial Analysis")
+            _ok("4.36x" in fa_d, "Borrower D: ISCR (4.36x) populates in Financial Analysis")
+            _ok("1.35x" in fa_d, "Borrower D: Current Ratio (1.35x) populates in Financial Analysis")
+            _ok("0.18x" in fa_d, "Borrower D: Debt-Equity (0.18x) populates in Financial Analysis")
+
+            # Financial Analysis's overall Approve/Reject status is still
+            # "Not Available / Requires Review" for this document - but
+            # now for a real, narrow, correctly-identified reason (Net
+            # Profit's own derivation depends on Exceptional Items, whose
+            # row could not be confidently attributed to a fiscal year on
+            # this filing's own numbers - see select_fy_values's
+            # REVIEW_REQUIRED path), not because Revenue/OCF/the Reported
+            # Ratios block were unlocatable (the old, wrong reason - see
+            # above, all of them now populate). This proves the Phase 1
+            # fix narrows the gap to what's genuinely unresolvable rather
+            # than either fabricating Net Profit or silently reusing
+            # Revenue/OCF/the ratios' now-correct availability to force
+            # an Approve/Reject this document's own numbers do not
+            # support.
+            _ok("Net Profit" in fa_d and "Not Available / Requires Review" in fa_d,
+                "Borrower D: Financial Analysis overall status is 'Not Available / Requires Review', "
+                "specifically because Net Profit (not Revenue/OCF/the Reported Ratios) could not be reliably computed")
+
             cov_d = text_d["4. Covenant Monitoring"]
             risk_d = text_d["9. Risk Scoring"]
-            _ok("Not Available" in cov_d, "Borrower D: Covenant Monitoring shows 'Not Available' rather than crashing on missing DSCR/ISCR")
-            _ok("Not Available" in risk_d, "Borrower D: Risk Scoring shows 'Not Available' rather than crashing on missing DSCR/ISCR/Current Ratio/Debt-Equity")
+            # Risk Scoring's Financial Strength component only needs
+            # DSCR/ISCR/Current Ratio/Debt-Equity (not Net Profit), all
+            # four of which now extract correctly - so Risk Scoring now
+            # resolves to a real grade instead of "Not Available".
+            _ok("Low Risk" in risk_d, "Borrower D: Risk Scoring resolves to a real grade (Low Risk) now that DSCR/ISCR/Current Ratio/Debt-Equity all extract correctly")
             # No other borrower's figures leak into Borrower D's pages, and
             # vice versa.
             all_d_text = "\n".join(text_d.values())

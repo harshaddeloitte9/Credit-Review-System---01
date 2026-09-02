@@ -35,6 +35,8 @@ import requests
 from openpyxl import load_workbook
 
 import ocr_pipeline
+import ai_validation
+import ai_correction_proposals
 from demo_source import build_demo_workbook, DemoSourceError
 
 UPLOAD_WORK_DIR = os.path.join(tempfile.gettempdir(), "credit_review_tool_pdf_upload")
@@ -343,6 +345,113 @@ def process_uploaded_pdf(pdf_path, original_filename, status_callback=None):
         else:
             status_counts["CORRECT"] += 1
 
+    # ------------------------------------------------------------
+    # AI-ASSISTED VALIDATION (Phase 2) - advisory only, see ai_validation.py.
+    #
+    # Deliberately NOT wrapped in the same "raise on failure" pattern as
+    # ocr/extraction/population above: this stage is optional and must
+    # never break the primary pipeline. ai_validation.validate_extracted_
+    # fields() already never raises for an unreachable Ollama or a
+    # missing model (both degrade to a clear AI_UNAVAILABLE result per
+    # field) - the try/except here is a second line of defense against a
+    # genuinely unexpected failure in this module, which still must not
+    # fail the upload the analyst is waiting on.
+    #
+    # `lines_for_ai` (whitespace-collapsed) and `layout_lines_for_ai`
+    # (column-position PRESERVING - see ocr_pipeline._normalize_preserve_
+    # layout) are reconstructed from `ocr_text` using ocr_pipeline's own
+    # (unmodified) helpers, built from the SAME filtered raw/normalized
+    # pairs so the two stay index-aligned - exactly the same two lists
+    # extract_financial_values() itself builds internally, so
+    # source_line_number in `extracted` indexes into both correctly.
+    # Kept as a local reconstruction here rather than a new return value
+    # from extract_financial_values(), so ocr_pipeline.py's extraction
+    # logic and its function signature are untouched by this phase.
+    # layout_lines_for_ai lets ai_validation.py re-locate each section's
+    # real table header and year-to-column mapping (Phase 2D) instead of
+    # asking the model to infer table structure from collapsed text.
+    # ------------------------------------------------------------
+    raw_and_normalized = [
+        (raw, ocr_pipeline.normalize_text(raw)) for raw in ocr_text.splitlines()
+    ]
+    raw_and_normalized = [(raw, norm) for raw, norm in raw_and_normalized if norm]
+    lines_for_ai = [norm for _raw, norm in raw_and_normalized]
+    layout_lines_for_ai = [
+        ocr_pipeline._normalize_preserve_layout(raw) for raw, _norm in raw_and_normalized
+    ]
+
+    _notify(status_callback, "ai_validation", "processing")
+    try:
+        ai_results, ai_presence_results, ai_availability = ai_validation.validate_extracted_fields(
+            extracted, lines_for_ai, meta, layout_lines=layout_lines_for_ai
+        )
+    except Exception as exc:
+        ai_results = {}
+        ai_presence_results = {}
+        ai_availability = ai_validation.OllamaAvailability(
+            reachable=False, model_installed=False, installed_models=[],
+            detail=f"AI validation failed unexpectedly: {exc}",
+        )
+
+    ai_technical_counts = {}
+    ai_validation_counts = {}
+    for result in ai_results.values():
+        ai_technical_counts[result.technical_status] = ai_technical_counts.get(result.technical_status, 0) + 1
+        if result.validation_status is not None:
+            ai_validation_counts[result.validation_status] = ai_validation_counts.get(result.validation_status, 0) + 1
+
+    ai_presence_counts = {}
+    for result in ai_presence_results.values():
+        ai_technical_counts[result.technical_status] = ai_technical_counts.get(result.technical_status, 0) + 1
+        if result.presence_status is not None:
+            ai_presence_counts[result.presence_status] = ai_presence_counts.get(result.presence_status, 0) + 1
+
+    ai_validation_available = (
+        bool(ai_results or ai_presence_results)
+        and ai_availability.reachable and ai_availability.model_installed
+    )
+    _notify(status_callback, "ai_validation", "complete" if ai_validation_available else "skipped", ai_availability.detail)
+
+    # ------------------------------------------------------------
+    # AI-ASSISTED MAPPING CORRECTION PROPOSALS (Phase 3A) - advisory
+    # only, see ai_correction_proposals.py. Runs AFTER AI validation
+    # above, since it only considers fields that validation itself (or
+    # the deterministic pipeline) already flagged as suspect. Same
+    # defensive try/except posture as AI validation: optional, must
+    # never break the primary upload the analyst is waiting on.
+    # ------------------------------------------------------------
+    _notify(status_callback, "ai_correction", "processing")
+    try:
+        correction_proposals, correction_availability = ai_correction_proposals.generate_correction_proposals(
+            extracted, ai_results, lines_for_ai, meta, layout_lines=layout_lines_for_ai
+        )
+    except Exception as exc:
+        correction_proposals = {}
+        correction_availability = ai_validation.OllamaAvailability(
+            reachable=False, model_installed=False, installed_models=[],
+            detail=f"AI correction-proposal generation failed unexpectedly: {exc}",
+        )
+
+    correction_technical_counts = {}
+    correction_proposal_counts = {}
+    for proposal in correction_proposals.values():
+        correction_technical_counts[proposal.technical_status] = correction_technical_counts.get(proposal.technical_status, 0) + 1
+        if proposal.proposal_status is not None:
+            correction_proposal_counts[proposal.proposal_status] = correction_proposal_counts.get(proposal.proposal_status, 0) + 1
+
+    if correction_availability is None:
+        # No field needed a correction-proposal attempt - Ollama was
+        # never even probed (see generate_correction_proposals).
+        correction_detail = "No fields required a correction-proposal attempt."
+        correction_available = False
+    else:
+        correction_detail = correction_availability.detail
+        correction_available = (
+            bool(correction_proposals)
+            and correction_availability.reachable and correction_availability.model_installed
+        )
+    _notify(status_callback, "ai_correction", "complete" if correction_available else "skipped", correction_detail)
+
     return {
         "pdf_name": original_filename,
         "timestamp": timestamp,
@@ -355,4 +464,17 @@ def process_uploaded_pdf(pdf_path, original_filename, status_callback=None):
         "status_counts": status_counts,
         "total_fields": len(debug_rows),
         "ocr_reused": ocr_reused,
+        "extracted": extracted,
+        "ai_validation_results": ai_results,
+        "ai_presence_results": ai_presence_results,
+        "ai_validation_available": ai_validation_available,
+        "ai_validation_detail": ai_availability.detail,
+        "ai_technical_counts": ai_technical_counts,
+        "ai_validation_counts": ai_validation_counts,
+        "ai_presence_counts": ai_presence_counts,
+        "correction_proposals": correction_proposals,
+        "correction_available": correction_available,
+        "correction_detail": correction_detail,
+        "correction_technical_counts": correction_technical_counts,
+        "correction_proposal_counts": correction_proposal_counts,
     }

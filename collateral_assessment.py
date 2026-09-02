@@ -31,32 +31,44 @@ Formulas reproduced exactly as found in '5-Collateral Assessment':
     Adjusted Value              = Book Value * (1 - Haircut% / 100)   (D15:D19)
     Total Adjusted Collateral   = SUM(Adjusted Value)                 (D21)
     Collateral Coverage Ratio   = Total Adjusted / Debt Exposure      (D23)
-    Collateral Rating           = >125 -> C28 text                    (D24)
-                                   100-125 -> C29 text
-                                   <100 -> C30 text
-    (the 125/100 cut-points are embedded in the reference workbook's own
-    IF formula, not in separate policy cells - transcribed here with the
-    cell reference documented, same treatment as risk_scoring.py's banded
-    IF-ladders; the band label TEXT itself is still read live from C28:C30,
-    not retyped.)
+    Collateral Rating           = >1.25x -> C28 text                   (D24)
+                                   1.00x-1.25x -> C29 text
+                                   <1.00x -> C30 text
+    (the cut-points are embedded in the reference workbook's own IF
+    formula as 125/100 - a percentage-shaped literal - not in separate
+    policy cells; compared here in the same unit as the ratio itself
+    (1.25/1.00) rather than against the raw ratio, see the unit-mismatch
+    fix above. The band label TEXT itself is still read live from
+    C28:C30, not retyped.)
 
-DISCOVERED REFERENCE-WORKBOOK INCONSISTENCY (reproduced faithfully, not
-"fixed" - flagged in the UI): D23 (Collateral Coverage Ratio) is a raw
-ratio (2.05 for ~205% coverage), but D24's IF formula compares D23
-directly against 125 and 100 as if it were already a percentage number
-(i.e. as if D23 were 205, not 2.05). Since a realistic ratio is never
->100, the reference workbook's own D24 always lands in the "<100" band
-("High collateral risk") regardless of how strong coverage actually is -
-confirmed against the reference workbook's own cached D24 value, which is
-"High collateral risk" despite ~205% coverage. This looks like a missing
-"D23*100" (or thresholds that should have been 1.25/1.00) in the source
-workbook. Reproduced exactly as written for parity.
+FIXED UNIT MISMATCH (previously reproduced faithfully from the reference
+workbook - now corrected): D23 (Collateral Coverage Ratio) is a raw ratio
+(2.05 for ~205% coverage), but D24's IF formula in the reference workbook
+compares D23 directly against 125 and 100 as if it were already a
+percentage number (i.e. as if D23 were 205, not 2.05). Since a realistic
+ratio is never >100, the reference workbook's own D24 always lands in the
+"<100" band ("High collateral risk") regardless of how strong coverage
+actually is - confirmed against the reference workbook's own cached D24
+value, which is "High collateral risk" despite ~205% coverage.
+
+This is a genuine defect, not a borrower-specific quirk, so it is no
+longer reproduced: the band comparison below uses the SAME unit as
+coverage_ratio itself (a raw multiple - 1.25 / 1.00, not 125 / 100),
+never rescaling coverage_ratio and never touching how it's displayed
+(still "2.05x", same as before) - only the threshold comparison changes.
 """
 
 from dataclasses import dataclass
 from typing import Optional
 
 from openpyxl import load_workbook
+
+# Same cut-points as the reference workbook's own D24 formula (125% /
+# 100% coverage), expressed as a raw multiple (1.25 / 1.00) - the same
+# unit coverage_ratio is already in - rather than the workbook's
+# percentage-shaped 125/100 literals. See build_collateral_assessment().
+_COVERAGE_STRONG_THRESHOLD = 1.25
+_COVERAGE_ADEQUATE_THRESHOLD = 1.00
 
 COLLATERAL_SHEET = "5-Collateral Assessment"
 
@@ -159,22 +171,89 @@ def build_collateral_assessment(inputs: CollateralInputs, debt_exposure: Optiona
 
     coverage_ratio = total_adjusted / debt_exposure
 
-    # '5-Collateral Assessment'!D24: =IF(D23>125,C28,IF(D23>=100,C29,C30)).
-    # Compares the raw ratio (e.g. 2.05) against 125/100 exactly as the
-    # reference workbook does - see the module docstring for the unit-
-    # mismatch this produces. Not "corrected" to *100 or to 1.25/1.00.
-    band_by_label = {label: (interpretation, credit_view) for label, interpretation, credit_view in inputs.rating_bands}
-    if coverage_ratio > 125:
-        rating = band_by_label[">125"][1]
-    elif coverage_ratio >= 100:
-        rating = band_by_label["100-125"][1]
-    else:
-        rating = band_by_label["<100"][1]
+    # '5-Collateral Assessment'!D24: =IF(D23>125,C28,IF(D23>=100,C29,C30)) -
+    # but D23 (coverage_ratio) is a raw multiple (2.05 for ~205% cover),
+    # and 125/100 are percentage-shaped literals. Comparing them directly,
+    # as the reference workbook's own formula does, means a realistic
+    # ratio (never >100) always falls into the "<100" band regardless of
+    # actual coverage strength (see the module docstring's fixed-unit-
+    # mismatch note - confirmed against Tata Steel's own cached D24, which
+    # read "High collateral risk" despite ~205% coverage). Fixed by
+    # comparing coverage_ratio against the SAME-unit thresholds
+    # (1.25 / 1.00) instead - coverage_ratio itself is untouched, so every
+    # existing caller/display (still "2.05x") is unaffected.
+    rating = _rate_coverage(coverage_ratio, inputs.rating_bands)
 
     return CollateralResult(
         assets=assets,
         total_adjusted_value=total_adjusted,
         debt_exposure=debt_exposure,
+        coverage_ratio=coverage_ratio,
+        rating=rating,
+    )
+
+
+def _rate_coverage(coverage_ratio: float, rating_bands) -> str:
+    """Shared band lookup for both the "as-is" coverage rating above and
+    compute_post_sanction_coverage() below - same thresholds, same
+    workbook-sourced band label text, only the ratio being rated differs."""
+    band_by_label = {label: (interpretation, credit_view) for label, interpretation, credit_view in rating_bands}
+    if coverage_ratio > _COVERAGE_STRONG_THRESHOLD:
+        return band_by_label[">125"][1]
+    if coverage_ratio >= _COVERAGE_ADEQUATE_THRESHOLD:
+        return band_by_label["100-125"][1]
+    return band_by_label["<100"][1]
+
+
+# Basis label shown alongside Post-Sanction Coverage wherever it's
+# rendered - named explicitly so the denominator is never ambiguous (see
+# compute_post_sanction_coverage()'s own docstring for why FB/NFB are
+# excluded from it).
+POST_SANCTION_BASIS_LABEL = "Existing Total Debt + Proposed Term Facility Exposure"
+
+
+@dataclass(frozen=True)
+class PostSanctionCoverage:
+    post_sanction_exposure: Optional[float]
+    coverage_ratio: Optional[float]
+    rating: str
+    basis_label: str = POST_SANCTION_BASIS_LABEL
+
+
+def compute_post_sanction_coverage(
+    collateral_result: CollateralResult, term_facility_exposure: Optional[float], rating_bands
+) -> PostSanctionCoverage:
+    """Pro-forma coverage AFTER the proposed TERM facility (see
+    proposed_exposure.py's Term Facility Exposure) is added on top of the
+    borrower's existing debt - does this SAME collateral schedule still
+    adequately cover the combined post-sanction term-debt load, not just
+    what's already on the balance sheet today (collateral_result's own
+    "Existing Coverage" above, entirely untouched by this function).
+
+    Deliberately excludes FB Requirement and NFB Commitment from the
+    denominator: this collateral schedule (Plant & Machinery, etc.) is
+    fixed-asset security, which conventionally secures the TERM facility;
+    working-capital (FB) is typically secured separately (hypothecation of
+    stock/receivables) and NFB (LCs/BGs) is a contingent, off-balance-
+    sheet commitment - both a different collateral pool this application
+    does not model. Folding them into this denominator would overstate
+    what this specific schedule is actually covering, so the basis is
+    named explicitly (basis_label / POST_SANCTION_BASIS_LABEL) rather than
+    left for the reader to guess."""
+
+    if collateral_result.debt_exposure is None or term_facility_exposure is None:
+        return PostSanctionCoverage(post_sanction_exposure=None, coverage_ratio=None, rating="Not available")
+
+    post_sanction_exposure = collateral_result.debt_exposure + term_facility_exposure
+
+    if post_sanction_exposure == 0:
+        return PostSanctionCoverage(post_sanction_exposure=post_sanction_exposure, coverage_ratio=None, rating="Not available")
+
+    coverage_ratio = collateral_result.total_adjusted_value / post_sanction_exposure
+    rating = _rate_coverage(coverage_ratio, rating_bands)
+
+    return PostSanctionCoverage(
+        post_sanction_exposure=post_sanction_exposure,
         coverage_ratio=coverage_ratio,
         rating=rating,
     )

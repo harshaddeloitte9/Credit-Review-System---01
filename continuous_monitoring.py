@@ -21,15 +21,18 @@ feed or news-monitoring feed anywhere in this project. Shown as not
 monitored by this application, with the reference workbook's own snapshot
 displayed for context only (not asserted as a live/current fact).
 
-DISCOVERED REFERENCE-WORKBOOK INCONSISTENCY (reproduced faithfully, not
-"fixed" - flagged in the UI): D10's Overall Status formula is
+FIXED REFERENCE-WORKBOOK INCONSISTENCY (previously reproduced faithfully,
+now corrected): D10's Overall Status formula is
 =IF(COUNTIF(D4:D9,"NOT PASS")>0,"NOT PASS","PASS"). Every individual
-trigger in D4:D9 can only ever read "PASS", "FAIL", or "WATCH LIST" - the
-literal text "NOT PASS" can never appear in that range, so this COUNTIF is
-structurally always 0 and D10 always evaluates to "PASS", regardless of
-whether any individual trigger actually failed. Reproduced exactly (the
-Python equivalent likewise always evaluates to "PASS" given the same value
-domain) rather than silently changed to check for "FAIL"/"WATCH LIST".
+trigger in D4:D9 can only ever read "PASS", "FAIL", "WATCH LIST", "NOT
+MONITORED", or the not-available placeholder - the literal text "NOT
+PASS" can never appear in that range, so this COUNTIF is structurally
+always 0 and D10 always evaluated to "PASS" regardless of whether any
+individual trigger actually failed. This was a genuine defect (the
+early-warning system could never actually warn), not a borrower-specific
+worked-example quirk, so it is no longer reproduced - see
+_aggregate_overall_status() below, which replaces the COUNTIF check with
+explicit precedence across the five distinct trigger states.
 
 Formulas reproduced exactly as found in '7-Continuous Monitoring':
     D4 = PASS if Revenue %chg > -10% (B4) else FAIL
@@ -37,7 +40,7 @@ Formulas reproduced exactly as found in '7-Continuous Monitoring':
     D6 = PASS if DSCR %chg > -35% (B6) else FAIL
     D7 = WATCH LIST if any covenant AMBER/RED, else PASS
     D8, D9 = analyst snapshot inputs (see note above)
-    D10 = Overall Status (see discovered-inconsistency note above)
+    D10 = Overall Status - fixed, see _aggregate_overall_status() below
 """
 
 from dataclasses import dataclass
@@ -83,6 +86,43 @@ def load_monitoring_policy(workbook_path) -> MonitoringPolicy:
 
 
 _NOT_AVAILABLE = "Not Available / Requires Review"
+_NOT_MONITORED = "NOT MONITORED"
+
+# Worst-to-best precedence for rolling up several triggers' individual
+# statuses into one overall status - replaces the reference workbook's
+# own COUNTIF(D4:D9,"NOT PASS") check, which could never fire (see the
+# module docstring's fixed-inconsistency note) because no trigger's own
+# status is ever literally "NOT PASS". Each of the five distinct states a
+# trigger can be in is handled explicitly below, in this order, rather
+# than by comparing against a string no trigger produces:
+#   FAIL         - a trigger actively breached its threshold
+#   WATCH LIST   - elevated attention warranted (a covenant is Amber/Red)
+#   NOT AVAILABLE - a trigger THIS DOCUMENT should have but couldn't be
+#                  computed (e.g. DSCR not disclosed) - a genuine gap,
+#                  so this must not silently read as "PASS"
+#   PASS         - every gate-eligible trigger came back clean
+# NOT MONITORED (external rating downgrade, adverse news) is excluded
+# from the roll-up entirely - it is a permanent, documented product
+# limitation (no data source exists for either, for any document), not a
+# per-document extraction gap, so it must never force every document's
+# overall status to NOT AVAILABLE.
+_OVERALL_STATUS_PRECEDENCE = ("FAIL", "WATCH LIST", _NOT_AVAILABLE)
+
+
+def _aggregate_overall_status(trigger_statuses):
+    gate_eligible = [s for s in trigger_statuses if s != _NOT_MONITORED]
+
+    if not gate_eligible:
+        # Every trigger this monitoring spans is NOT MONITORED - should
+        # not happen given today's fixed trigger set, but never silently
+        # "PASS" from zero evidence either.
+        return _NOT_AVAILABLE
+
+    for status in _OVERALL_STATUS_PRECEDENCE:
+        if status in gate_eligible:
+            return "NOT PASS" if status == "FAIL" else status
+
+    return "PASS"
 
 
 def _pct_trigger(label, threshold_text, pct_change, ok_fn):
@@ -122,20 +162,17 @@ def build_continuous_monitoring(policy: MonitoringPolicy, revenue_pct_change, to
     ))
     triggers.append(MonitoringTrigger(
         "External rating downgrade", "Any downgrade -> watch list",
-        None, "NOT MONITORED",
+        None, _NOT_MONITORED,
         note=f"Reference workbook snapshot (not live-monitored by this application): {policy.external_rating_note}",
     ))
     triggers.append(MonitoringTrigger(
         "Adverse news / qualitative disclosure", "Material adverse item -> Amber, analyst verifies",
-        None, "NOT MONITORED",
+        None, _NOT_MONITORED,
         note=f"Reference workbook snapshot (not live-monitored by this application): {policy.adverse_news_note}",
     ))
 
-    # '7-Continuous Monitoring'!D10 - see discovered-inconsistency note in
-    # the module docstring: only the literal text "NOT PASS" would trip
-    # this gate, and no trigger status in this workbook can ever be that
-    # text, so it structurally always resolves to "PASS".
-    statuses = [t.status for t in triggers]
-    overall_status = "NOT PASS" if statuses.count("NOT PASS") > 0 else "PASS"
+    # '7-Continuous Monitoring'!D10 - fixed, see _aggregate_overall_status()
+    # and the module docstring's fixed-inconsistency note.
+    overall_status = _aggregate_overall_status([t.status for t in triggers])
 
     return ContinuousMonitoringResult(triggers=triggers, overall_status=overall_status)
