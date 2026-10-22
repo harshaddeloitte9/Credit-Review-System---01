@@ -15,6 +15,9 @@ import shutil
 import sys
 import tempfile
 
+import ai_correction_proposals
+import ai_dynamic_mapping
+import ai_validation
 import ocr_upload
 import ocr_pipeline
 
@@ -61,6 +64,29 @@ def test_ocr_cache_reuse():
 
     ocr_pipeline.extract_financial_values = _counting_extract
 
+    # This test's fixture OCR text has only 2 real fields (Revenue, Total
+    # assets) - every other template field is genuinely NOT_FOUND, which
+    # would otherwise make the real, unmocked AI layers (each imports
+    # check_ollama_availability/call_ollama FROM ai_validation via
+    # `from X import Y`, so each needs its own mock) attempt real, slow
+    # inference against a genuinely-running Ollama - this test is about
+    # OCR caching, not AI behavior, so all three are mocked unavailable.
+    def _ai_unavailable(*a, **k):
+        return ai_validation.OllamaAvailability(False, False, [], "mocked unavailable - out of scope for this test")
+
+    def _should_not_be_called(*a, **k):
+        raise AssertionError("no AI layer must ever make a real Ollama call in this test file")
+
+    real_av_check, real_av_call = ai_validation.check_ollama_availability, ai_validation.call_ollama
+    real_acp_check, real_acp_call = ai_correction_proposals.check_ollama_availability, ai_correction_proposals.call_ollama
+    real_adm_check, real_adm_call = ai_dynamic_mapping.check_ollama_availability, ai_dynamic_mapping.call_ollama
+    ai_validation.check_ollama_availability = _ai_unavailable
+    ai_validation.call_ollama = _should_not_be_called
+    ai_correction_proposals.check_ollama_availability = _ai_unavailable
+    ai_correction_proposals.call_ollama = _should_not_be_called
+    ai_dynamic_mapping.check_ollama_availability = _ai_unavailable
+    ai_dynamic_mapping.call_ollama = _should_not_be_called
+
     try:
         stage_log = []
 
@@ -99,6 +125,12 @@ def test_ocr_cache_reuse():
     finally:
         ocr_upload.run_ocr = real_run_ocr
         ocr_pipeline.extract_financial_values = real_extract
+        ai_validation.check_ollama_availability = real_av_check
+        ai_validation.call_ollama = real_av_call
+        ai_correction_proposals.check_ollama_availability = real_acp_check
+        ai_correction_proposals.call_ollama = real_acp_call
+        ai_dynamic_mapping.check_ollama_availability = real_adm_check
+        ai_dynamic_mapping.call_ollama = real_adm_call
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 

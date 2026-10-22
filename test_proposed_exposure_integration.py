@@ -86,7 +86,7 @@ def test_a_pdf_mode_requested_amount_flows_downstream():
         at.session_state["pdf_name"] = "borrower_b.pdf"
         at.run(timeout=60)
 
-        at.sidebar.radio[0].set_value("6. Limit Setting")
+        at.sidebar.radio[0].set_value("7. Limit Setting")
         at.run(timeout=60)
 
         _ok(any(w.key == "_deal_requested_amount_widget" for w in at.number_input),
@@ -105,24 +105,24 @@ def test_a_pdf_mode_requested_amount_flows_downstream():
         limit_page_1 = "\n".join(str(m.value) for m in at.markdown)
         _ok("₹1,000 Cr" in limit_page_1, f"Requested Amount = 1,000 reflected on Limit Setting (Recommended Limit uncapped at this level)")
 
-        portfolio_page_1 = _page_text(at, "7. Portfolio Monitoring")
+        portfolio_page_1 = _page_text(at, "8. Portfolio Monitoring")
         _ok("₹1,000 Cr" in portfolio_page_1,
             "Portfolio Monitoring's Proposed Loan Amount reflects Requested Amount = 1,000 (Total Proposed Commitment, FB/NFB zeroed)")
 
         # Change Requested Amount to a different, still-uncapped value.
-        at.sidebar.radio[0].set_value("6. Limit Setting")
+        at.sidebar.radio[0].set_value("7. Limit Setting")
         at.run(timeout=60)
         _set_number_input(at, "deal_requested_amount", 3000.0)
         at.run(timeout=60)
 
-        portfolio_page_2 = _page_text(at, "7. Portfolio Monitoring")
+        portfolio_page_2 = _page_text(at, "8. Portfolio Monitoring")
         _ok("₹3,000 Cr" in portfolio_page_2,
             "Portfolio Monitoring's Proposed Loan Amount UPDATES to 3,000 after Requested Amount changes")
         _ok("₹1,000 Cr" not in portfolio_page_2,
             "Portfolio Monitoring no longer shows the OLD 1,000 figure - not stuck on a stale/frozen value")
 
         # Credit Memo's own Exposure Summary must show the SAME figure.
-        memo_page_2 = _page_text(at, "8. Credit Memo")
+        memo_page_2 = _page_text(at, "9. Credit Memo")
         _ok("3,000" in memo_page_2, "Credit Memo's Proposed Exposure Summary also reflects the new Requested Amount (3,000)")
         _ok("Reconciled" in memo_page_2, "Credit Memo's reconciliation banner reports 'Reconciled' - PDF mode wiring is self-consistent by construction")
     finally:
@@ -141,7 +141,7 @@ def test_b_advanced_mode_unchanged():
     at.session_state["uploaded_workbook_name"] = "Credit Review Automation Example.xlsx"
     at.run(timeout=60)
 
-    at.sidebar.radio[0].set_value("6. Limit Setting")
+    at.sidebar.radio[0].set_value("7. Limit Setting")
     at.run(timeout=60)
     _ok(not at.exception, f"Limit Setting renders with no exception in Advanced mode: {[str(e) for e in at.exception]}")
     _ok(not any(w.key == "_deal_requested_amount_widget" for w in at.number_input),
@@ -149,17 +149,17 @@ def test_b_advanced_mode_unchanged():
     limit_page = "\n".join(str(m.value) for m in at.markdown)
     _ok("₹5,000 Cr" in limit_page, "Advanced mode: Requested Amount KPI still shows the reference workbook's own B4 value (5,000), unchanged")
 
-    portfolio_page = _page_text(at, "7. Portfolio Monitoring")
+    portfolio_page = _page_text(at, "8. Portfolio Monitoring")
     _ok("₹5,000 Cr" in portfolio_page,
         "Advanced mode: Portfolio Monitoring's Proposed Loan Amount is UNCHANGED at the workbook's own C11 value (5,000)")
 
-    collateral_page = _page_text(at, "5. Collateral Assessment")
+    collateral_page = _page_text(at, "6. Collateral Assessment")
     _ok("Post-Sanction Coverage" in collateral_page,
         "Advanced mode: the NEW Post-Sanction Coverage section is additive and still appears")
     _ok("205" in collateral_page or "2.05" in collateral_page,
         "Advanced mode: Existing Coverage Ratio (~205% / 2.05x) is still shown, unchanged by this phase's work")
 
-    memo_page = _page_text(at, "8. Credit Memo")
+    memo_page = _page_text(at, "9. Credit Memo")
     _ok("Proposed Exposure Summary" in memo_page, "Advanced mode: Credit Memo's new Exposure Summary section still renders (additive, informational)")
 
 

@@ -125,26 +125,50 @@ import ocr_pipeline
 
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 
-# qwen2.5:7b-instruct is the recommended default (see Phase 2A design) -
-# a good balance of structured-output reliability and size for an office
-# laptop. Never assumed installed - check_ollama_availability() below
-# always verifies it (or whatever model is configured) is actually
-# present before any call is attempted.
-DEFAULT_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b-instruct")
+# qwen2.5:7b-instruct was Phase 2A's original recommendation, but was
+# never actually installed in this environment across every phase of
+# this project (network/registry issues pulling it) - every real live
+# test this whole project has run against llama3.2:latest instead, via
+# an explicit per-call override in throwaway scripts. Those overrides
+# never touched this default, so the actually-running application (every
+# real call site in ocr_upload.py calls with no `model=` override) was
+# silently checking for/requesting a model that was never installed,
+# unconditionally reporting AI_UNAVAILABLE for every field regardless of
+# Ollama's real state - confirmed empirically: check_ollama_availability()
+# with no override returned model_installed=False with detail "...
+# 'qwen2.5:7b-instruct' is not installed..." even with Ollama running and
+# llama3.2:latest genuinely installed and working. Never assumed
+# installed either way - check_ollama_availability() below always
+# verifies it (or whatever model is configured) is actually present
+# before any call is attempted.
+DEFAULT_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2:latest")
 
 AVAILABILITY_TIMEOUT = 1.5   # seconds - just checking the API is up
 
 # Per-call timeout. Raised from Phase 2B's 60s: real batches of even a
 # handful of fields regularly exceed that on CPU-only hardware (see
-# module docstring). 150s comfortably covers a MAX_FIELDS_PER_BATCH=4
-# batch (~4 x ~25s/field + warm-up) with margin, without approaching
-# the 400-600s this phase was explicitly told not to jump to.
+# module docstring). 150s was originally sized for a
+# MAX_FIELDS_PER_BATCH=4 batch, but real measurement on this CPU-only
+# machine showed a 4-field batch ranging anywhere from ~125s to ~270s -
+# close enough to 150s that it genuinely timed out in real use (a real
+# requests.exceptions.ReadTimeout, not a hidden/hypothetical failure),
+# marking every field in that batch AI_ERROR together. Left unchanged
+# here - MAX_FIELDS_PER_BATCH below is lowered instead, which shrinks
+# each call's own real duration well under this same timeout without
+# touching the timeout value itself.
 CALL_TIMEOUT = int(os.environ.get("OLLAMA_CALL_TIMEOUT", "150"))
 
 # Hard cap on fields per Ollama call. A large section (e.g. a 12-field
 # Balance Sheet) is now split into several small batches instead of one
 # call that scales past any reasonable timeout - see module docstring.
-MAX_FIELDS_PER_BATCH = int(os.environ.get("AI_VALIDATION_MAX_FIELDS_PER_BATCH", "4"))
+# Lowered from 4 to 1: real measurement on this CPU-only machine showed
+# a 4-field batch's own real duration (~125-270s) sitting right on top
+# of CALL_TIMEOUT (150s), causing genuine timeouts that marked every
+# field in the batch AI_ERROR together. A single-field call is both
+# smaller (faster, safely under the timeout) and, if it does still time
+# out, only ever costs that one field rather than up to three others
+# that would have otherwise validated successfully in the same batch.
+MAX_FIELDS_PER_BATCH = int(os.environ.get("AI_VALIDATION_MAX_FIELDS_PER_BATCH", "1"))
 
 # Document-level wall-clock ceiling across the WHOLE validate_extracted_
 # fields() run (all batches, both the main validator and the NOT_FOUND

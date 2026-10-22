@@ -67,15 +67,15 @@ def main():
     area_labels = list(at.sidebar.radio[0].options)
     print("AREAS:", area_labels)
     _ok(area_labels == [
-        "1. Data Upload", "2. Input & Validation", "3. Financial Analysis",
-        "4. Covenant Monitoring", "5. Collateral Assessment", "6. Limit Setting",
-        "7. Portfolio Monitoring", "8. Credit Memo", "9. Risk Scoring",
+        "1. Data Upload", "2. Data Review", "3. Input & Validation", "4. Financial Analysis",
+        "5. Covenant Monitoring", "6. Collateral Assessment", "7. Limit Setting",
+        "8. Portfolio Monitoring", "9. Credit Memo", "10. Risk Scoring",
     ], "AREAS list matches the approved final navigation exactly")
     _ok(not any("Continuous Monitoring" in a for a in area_labels),
         "'Continuous Monitoring' is not a standalone nav entry")
     _ok(sum(1 for a in area_labels if "Risk Scoring" in a) == 1,
         "'Risk Scoring' appears in the nav exactly once")
-    _ok(area_labels[-1] == "9. Risk Scoring", "'Risk Scoring' is the LAST nav item")
+    _ok(area_labels[-1] == "10. Risk Scoring", "'Risk Scoring' is the LAST nav item")
 
     page_text_by_area = {}
     for area in area_labels:
@@ -85,7 +85,7 @@ def main():
         texts = [m.value for m in at.markdown] + [c.value for c in at.caption]
         page_text_by_area[area] = "\n".join(str(t) for t in texts)
 
-    cov_page = page_text_by_area["4. Covenant Monitoring"]
+    cov_page = page_text_by_area["5. Covenant Monitoring"]
     _ok("Financial Covenants" in cov_page, "Covenant Monitoring page contains a Financial Covenants section")
     _ok("Non-Financial Covenants" in cov_page, "Covenant Monitoring page contains a Non-Financial Covenants section")
     _ok("Continuous / Early-Warning Monitoring" in cov_page, "Covenant Monitoring page contains the merged Continuous/Early-Warning Monitoring section")
@@ -93,7 +93,7 @@ def main():
     _ok("Additional Borrowing Restrictions" in cov_page, "Non-financial covenant taxonomy row present: Additional Borrowing Restrictions")
     _ok("Change of Control" in cov_page, "Non-financial covenant taxonomy row present: Change of Control")
 
-    limit_page = page_text_by_area["6. Limit Setting"]
+    limit_page = page_text_by_area["7. Limit Setting"]
     _ok("Fund-Based (FB) Limit Assessment" in limit_page, "Limit Setting page contains Fund-Based (FB) Limit Assessment")
     _ok("Non-Fund-Based (NFB) Limit Assessment" in limit_page, "Limit Setting page contains Non-Fund-Based (NFB) Limit Assessment")
     _ok("NFB Benchmarking" in limit_page, "Limit Setting page contains an NFB Benchmarking section")
@@ -101,13 +101,13 @@ def main():
     _ok(limit_page.count("Analyst-entered") >= 8,
         f"all 8 fields with no data source (Inventory/Receivable/Payable Days, Contribution %, and 4 NFB fields) are labeled 'Analyst-entered' - found {limit_page.count('Analyst-entered')}")
 
-    memo_page = page_text_by_area["8. Credit Memo"]
+    memo_page = page_text_by_area["9. Credit Memo"]
     _ok("Covenant Assessment" in memo_page, "Credit Memo contains a consolidated Covenant Assessment grouping")
     _ok("Area 7 - Continuous Monitoring" not in memo_page, "Credit Memo has no standalone 'Area 7 - Continuous Monitoring' row")
     _ok("Fund-Based (FB) Assessment" in memo_page, "Credit Memo reflects the Fund-Based (FB) assessment")
     _ok("Non-Fund-Based (NFB) Assessment" in memo_page, "Credit Memo reflects the Non-Fund-Based (NFB) assessment")
 
-    risk_page = page_text_by_area["9. Risk Scoring"]
+    risk_page = page_text_by_area["10. Risk Scoring"]
     _ok("Risk Factor Breakdown" in risk_page, "Risk Scoring page (moved to last) still renders its existing content unchanged")
     _ok("Financial Strength" in risk_page, "Risk Scoring page still shows its existing Financial Strength section")
 
@@ -139,7 +139,7 @@ def main():
     # real UI widgets and confirm the output matches that example's
     # arithmetic (~Rs 6,781 Cr) - then change ONE input and confirm the
     # output changes accordingly, proving it isn't pinned to that figure.
-    at.sidebar.radio[0].set_value("6. Limit Setting")
+    at.sidebar.radio[0].set_value("7. Limit Setting")
     at.run(timeout=60)
 
     def _set_number_input(session_key, value):
@@ -181,9 +181,9 @@ def main():
     # upload (navigating to another page and back) - the prefill must only
     # re-fire on a genuinely new/different upload identity, never clobber
     # an edit the analyst has already made for the document still loaded.
-    at.sidebar.radio[0].set_value("3. Financial Analysis")
+    at.sidebar.radio[0].set_value("4. Financial Analysis")
     at.run(timeout=60)
-    at.sidebar.radio[0].set_value("6. Limit Setting")
+    at.sidebar.radio[0].set_value("7. Limit Setting")
     at.run(timeout=60)
     _ok(at.session_state["fb_annual_sales"] == 24000.0,
         f"analyst's manually-entered Annual Sales (24000.0) survives navigating away and back within the same upload - got {at.session_state['fb_annual_sales']}")
@@ -212,14 +212,14 @@ def main():
     at_real.run(timeout=60)
     _ok(not at_real.exception, f"real Tata Steel data: initial run has no exception: {[str(e) for e in at_real.exception]}")
 
-    at_real.sidebar.radio[0].set_value("3. Financial Analysis")
+    at_real.sidebar.radio[0].set_value("4. Financial Analysis")
     at_real.run(timeout=60)
     fa_text = "\n".join(str(m.value) for m in at_real.markdown) + "\n".join(str(c.value) for c in at_real.caption)
     _ok("reference-workbook" not in fa_text.lower() and "parity" not in fa_text.lower(),
         "Financial Analysis no longer shows the retired 'reference workbook parity' echo language")
     _ok("62" in fa_text or "67" in fa_text, "Financial Analysis's Key Ratios table shows the real disclosed Inventory Days value")
 
-    at_real.sidebar.radio[0].set_value("6. Limit Setting")
+    at_real.sidebar.radio[0].set_value("7. Limit Setting")
     at_real.run(timeout=60)
     real_limit_text = "\n".join(str(m.value) for m in at_real.markdown) + "\n".join(str(c.value) for c in at_real.caption)
     _ok("Auto-populated from Inventory Turnover Ratio" in real_limit_text,

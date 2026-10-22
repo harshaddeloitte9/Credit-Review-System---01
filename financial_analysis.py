@@ -243,7 +243,7 @@ def build_financial_analysis(bundle: ReferenceBundle) -> FinancialAnalysisResult
         ))
     else:
         add2("debt_equity", "Debt-Equity", d.reported_debt_equity.current, d.reported_debt_equity.previous,
-             policy["debt_equity"], lambda cur: cur >= 0.5,
+             policy["debt_equity"], lambda cur: cur >= policy["debt_equity"],
              "input, Reported Ratios block (1-Input Data B52/D52)",
              f"Calculated cross-check (Net Debt / Average Equity) = {_fmt_or_na(c.debt_equity.current, 'x')} "
              f"FY-current / {_fmt_or_na(c.debt_equity.previous, 'x')} FY-previous - ties within tolerance.")
@@ -255,7 +255,7 @@ def build_financial_analysis(bundle: ReferenceBundle) -> FinancialAnalysisResult
         ))
     else:
         add2("dscr", "DSCR", d.reported_dscr.current, d.reported_dscr.previous,
-             policy["dscr"], lambda cur: cur >= 1.5,
+             policy["dscr"], lambda cur: cur >= policy["dscr"],
              "input, Reported Ratios block (1-Input Data B49/D49)",
              f"Calculated cross-check (EBIT / (Net Finance Charges + Principal Repayments)) = "
              f"{_fmt_or_na(c.dscr.current, 'x')} FY-current / {_fmt_or_na(c.dscr.previous, 'x')} FY-previous - does NOT tie "
@@ -270,7 +270,7 @@ def build_financial_analysis(bundle: ReferenceBundle) -> FinancialAnalysisResult
         ))
     else:
         add2("iscr", "ISCR", d.reported_iscr.current, d.reported_iscr.previous,
-             policy["iscr"], lambda cur: cur >= 3,
+             policy["iscr"], lambda cur: cur >= policy["iscr"],
              "input, Reported Ratios block (1-Input Data B50/D50)",
              f"Calculated cross-check (EBIT / Net Finance Charges) = {_fmt_or_na(c.iscr.current, 'x')} "
              f"FY-current / {_fmt_or_na(c.iscr.previous, 'x')} FY-previous - does not tie closely to the "
@@ -283,7 +283,7 @@ def build_financial_analysis(bundle: ReferenceBundle) -> FinancialAnalysisResult
         ))
     else:
         add2("current_ratio", "Current Ratio", d.reported_current_ratio.current, d.reported_current_ratio.previous,
-             policy["current_ratio"], lambda cur: cur >= 0.5,
+             policy["current_ratio"], lambda cur: cur >= policy["current_ratio"],
              "input, Reported Ratios block (1-Input Data B51/D51)",
              f"Calculated cross-check (Current Assets / (Current Liabilities - Current Lease "
              f"Liabilities)) = {_fmt_or_na(c.current_ratio.current, 'x')} FY-current / "
@@ -297,7 +297,7 @@ def build_financial_analysis(bundle: ReferenceBundle) -> FinancialAnalysisResult
         ))
     else:
         add2("debt_assets", "Debt/Assets", d.reported_debt_assets.current, d.reported_debt_assets.previous,
-             policy["debt_assets"], lambda cur: cur < 0.6,
+             policy["debt_assets"], lambda cur: cur < policy["debt_assets"],
              "input, Reported Ratios block (1-Input Data B53/D53)",
              f"Calculated cross-check (Total Debt / Total Assets) = {_fmt_or_na(c.debt_assets.current)} "
              f"FY-current / {_fmt_or_na(c.debt_assets.previous)} FY-previous - ties within tolerance.")
@@ -340,13 +340,13 @@ def build_financial_analysis(bundle: ReferenceBundle) -> FinancialAnalysisResult
         ))
     else:
         add2("ebitda_margin_pct", "EBITDA Margin %", ebitda_margin_pct_cur, ebitda_margin_pct_prev,
-             policy["ebitda_margin_pct"], lambda cur: cur > 15,
+             policy["ebitda_margin_pct"], lambda cur: cur > policy["ebitda_margin_pct"],
              "calculated = EBITDA / Revenue (1-Input Data B18/B5 formula chain)")
 
     net_profit_margin_pct_cur = c.net_profit_margin.current * 100 if c.net_profit_margin.current is not None else None
     net_profit_margin_pct_prev = c.net_profit_margin.previous * 100 if c.net_profit_margin.previous is not None else None
     add2("net_profit_margin_pct", "Net Profit Margin %", net_profit_margin_pct_cur, net_profit_margin_pct_prev,
-         policy["net_profit_margin_pct"], lambda cur: cur > 10,
+         policy["net_profit_margin_pct"], lambda cur: cur > policy["net_profit_margin_pct"],
          "calculated = Net Profit / Revenue (1-Input Data B16/B5 formula chain)",
          unavailable_note="Net Profit Margin requires both Net Profit and Revenue to be available "
                            "for this document.")
@@ -383,6 +383,18 @@ def build_financial_analysis(bundle: ReferenceBundle) -> FinancialAnalysisResult
     _mark("Debt/Assets", d.reported_debt_assets.current, False)
     _mark("Debtors Days", d.reported_debtors_turnover_days.current, False)
     _mark("Inventory Days", d.reported_inventory_turnover_days.current, False)
+    # These three are excluded from statuses_used_for_gate (see the rows1/
+    # rows2 guards above) but were previously never marked as unavailable
+    # either - meaning the transparency note below could silently omit a
+    # genuinely missing metric even though it correctly never affected the
+    # decision itself. Marked here (non-critical) purely so the note is
+    # complete, with no change to what can block Approve.
+    _mark("Net Worth", None if d.reported_net_worth.current is None or d.reported_net_worth.previous is None else d.reported_net_worth.current, False)
+    _mark("EBITDA Margin %", ebitda_margin_pct_cur, False)
+    _mark("OCF to Debt", None if (
+        d.operating_cash_flow.current is None or d.operating_cash_flow.previous is None
+        or m.total_debt.current is None or m.total_debt.previous is None
+    ) else 1, False)
 
     if not statuses_used_for_gate:
         # Every metric this gate could span is unavailable for this

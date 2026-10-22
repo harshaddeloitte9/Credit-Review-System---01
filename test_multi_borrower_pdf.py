@@ -281,8 +281,8 @@ def main():
         for marker in borrower_b_markers:
             _ok(marker not in all_a_text, f"Borrower B figure '{marker}' does not appear anywhere on Borrower A's pages")
 
-        fa_a = text_a["3. Financial Analysis"]
-        fa_b = text_b["3. Financial Analysis"]
+        fa_a = text_a["4. Financial Analysis"]
+        fa_b = text_b["4. Financial Analysis"]
         _ok("Approve" in fa_a or "Reject" in fa_a, "Borrower A's Financial Analysis shows a real Approve/Reject status")
         _ok("Approve" in fa_b or "Reject" in fa_b, "Borrower B's Financial Analysis shows a real Approve/Reject status")
         _ok(fa_a != fa_b, "Borrower A's and Borrower B's Financial Analysis page text differ")
@@ -303,7 +303,7 @@ def main():
         if text_d is not None:
             _borrowers.append(("Borrower D (Tata Chemicals)", text_d))
         for name, text in _borrowers:
-            coll_page = text["5. Collateral Assessment"]
+            coll_page = text["6. Collateral Assessment"]
             _ok("Unavailable" in coll_page, f"{name}: Collateral Assessment shows 'Unavailable', not a collateral schedule")
             _ok("109,060" not in coll_page, f"{name}: Collateral Assessment does not show Tata Steel's PP&E book value (109,060)")
 
@@ -311,9 +311,9 @@ def main():
         print("=" * 100)
         print("6. BORROWER C (NO REPORTED RATIOS): GRACEFUL 'NOT AVAILABLE', NEVER A CRASH")
         print("=" * 100)
-        cov_c = text_c["4. Covenant Monitoring"]
-        risk_c = text_c["9. Risk Scoring"]
-        fa_c = text_c["3. Financial Analysis"]
+        cov_c = text_c["5. Covenant Monitoring"]
+        risk_c = text_c["10. Risk Scoring"]
+        fa_c = text_c["4. Financial Analysis"]
         _ok("Not Available" in fa_c, "Borrower C's Financial Analysis shows 'Not Available' for the missing Reported Ratios metrics")
         _ok("Not Available" in cov_c, "Borrower C's Covenant Monitoring shows 'Not Available' rather than crashing on missing DSCR/ISCR")
         _ok("Not Available" in risk_c, "Borrower C's Risk Scoring shows 'Not Available' rather than crashing on missing DSCR/ISCR/Current Ratio/Debt-Equity")
@@ -324,8 +324,8 @@ def main():
             print("6b. BORROWER D (TATA CHEMICALS): PHASE 1 EXTRACTION FIXES - REVENUE, OCF, THE")
             print("    REPORTED RATIOS BLOCK AND CURRENT BORROWINGS NOW POPULATE CORRECTLY")
             print("=" * 100)
-            iv_d = text_d["2. Input & Validation"]
-            fa_d = text_d["3. Financial Analysis"]
+            iv_d = text_d["3. Input & Validation"]
+            fa_d = text_d["4. Financial Analysis"]
             # Balance Sheet fields DO extract for this real document (that
             # table's layout matches Tata Steel's) - Total Assets (25,305)
             # and Total Equity (19,308), the Standalone figures, must show.
@@ -397,8 +397,8 @@ def main():
                 "Borrower D: Financial Analysis overall status is 'Not Available / Requires Review', "
                 "specifically because Net Profit (not Revenue/OCF/the Reported Ratios) could not be reliably computed")
 
-            cov_d = text_d["4. Covenant Monitoring"]
-            risk_d = text_d["9. Risk Scoring"]
+            cov_d = text_d["5. Covenant Monitoring"]
+            risk_d = text_d["10. Risk Scoring"]
             # Risk Scoring's Financial Strength component only needs
             # DSCR/ISCR/Current Ratio/Debt-Equity (not Net Profit), all
             # four of which now extract correctly - so Risk Scoring now
@@ -417,11 +417,11 @@ def main():
         print("=" * 100)
         text_a_again = _run_all_pages(merged_a, "tata_steel.pdf")
         _ok(
-            text_a_again["3. Financial Analysis"] == text_a["3. Financial Analysis"],
+            text_a_again["4. Financial Analysis"] == text_a["4. Financial Analysis"],
             "Borrower A's Financial Analysis page is byte-identical before and after Borrower B/C/D were processed",
         )
         _ok(
-            text_a_again["9. Risk Scoring"] == text_a["9. Risk Scoring"],
+            text_a_again["10. Risk Scoring"] == text_a["10. Risk Scoring"],
             "Borrower A's Risk Scoring page is byte-identical before and after Borrower B/C/D were processed",
         )
 

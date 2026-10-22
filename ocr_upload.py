@@ -37,6 +37,7 @@ from openpyxl import load_workbook
 import ocr_pipeline
 import ai_validation
 import ai_correction_proposals
+import ai_dynamic_mapping
 from demo_source import build_demo_workbook, DemoSourceError
 
 UPLOAD_WORK_DIR = os.path.join(tempfile.gettempdir(), "credit_review_tool_pdf_upload")
@@ -309,6 +310,68 @@ def process_uploaded_pdf(pdf_path, original_filename, status_callback=None):
         raise
     _notify(status_callback, "extraction", "complete")
 
+    # `lines_for_ai` (whitespace-collapsed) and `layout_lines_for_ai`
+    # (column-position PRESERVING - see ocr_pipeline._normalize_preserve_
+    # layout) are reconstructed from `ocr_text` using ocr_pipeline's own
+    # (unmodified) helpers, built from the SAME filtered raw/normalized
+    # pairs so the two stay index-aligned - exactly the same two lists
+    # extract_financial_values() itself builds internally, so
+    # source_line_number in `extracted` indexes into both correctly.
+    # Kept as a local reconstruction here rather than a new return value
+    # from extract_financial_values(), so ocr_pipeline.py's extraction
+    # logic and its function signature are untouched by every AI phase.
+    # Built HERE (before population) rather than after, so the AI mapping
+    # step below can use them to try resolving NOT_FOUND fields before
+    # the workbook is ever populated.
+    raw_and_normalized = [
+        (raw, ocr_pipeline.normalize_text(raw)) for raw in ocr_text.splitlines()
+    ]
+    raw_and_normalized = [(raw, norm) for raw, norm in raw_and_normalized if norm]
+    lines_for_ai = [norm for _raw, norm in raw_and_normalized]
+    layout_lines_for_ai = [
+        ocr_pipeline._normalize_preserve_layout(raw) for raw, _norm in raw_and_normalized
+    ]
+
+    # ------------------------------------------------------------
+    # AI-ASSISTED DYNAMIC FIELD MAPPING (this phase) - advisory only,
+    # see ai_dynamic_mapping.py. Runs BEFORE population so a verified
+    # AI-mapped value is written into the template exactly like any
+    # other extracted field - populate_workbook() itself is never
+    # modified or aware this phase exists. Same defensive try/except
+    # posture as AI validation below: optional, must never break the
+    # primary upload the analyst is waiting on. Only ever touches
+    # fields ocr_pipeline already marked NOT_FOUND - every other field
+    # passes through this call byte-for-byte unchanged.
+    # ------------------------------------------------------------
+    _notify(status_callback, "ai_mapping", "processing")
+    try:
+        extracted, ai_mapping_results, ai_mapping_availability = ai_dynamic_mapping.map_missing_fields(
+            extracted, lines_for_ai, meta, layout_lines=layout_lines_for_ai
+        )
+    except Exception as exc:
+        ai_mapping_results = {}
+        ai_mapping_availability = ai_validation.OllamaAvailability(
+            reachable=False, model_installed=False, installed_models=[],
+            detail=f"AI dynamic mapping failed unexpectedly: {exc}",
+        )
+
+    ai_mapping_technical_counts = {}
+    ai_mapping_status_counts = {}
+    for result in ai_mapping_results.values():
+        ai_mapping_technical_counts[result.technical_status] = ai_mapping_technical_counts.get(result.technical_status, 0) + 1
+        if result.mapping_status is not None:
+            ai_mapping_status_counts[result.mapping_status] = ai_mapping_status_counts.get(result.mapping_status, 0) + 1
+
+    ai_mapping_available = (
+        bool(ai_mapping_results)
+        and ai_mapping_availability is not None
+        and ai_mapping_availability.reachable and ai_mapping_availability.model_installed
+    )
+    _notify(
+        status_callback, "ai_mapping", "complete" if ai_mapping_available else "skipped",
+        ai_mapping_availability.detail if ai_mapping_availability is not None else "No fields required a mapping attempt.",
+    )
+
     _notify(status_callback, "population", "processing")
     try:
         wb = ocr_pipeline.populate_workbook(ocr_pipeline.TEMPLATE_FILE, extracted)
@@ -357,29 +420,10 @@ def process_uploaded_pdf(pdf_path, original_filename, status_callback=None):
     # genuinely unexpected failure in this module, which still must not
     # fail the upload the analyst is waiting on.
     #
-    # `lines_for_ai` (whitespace-collapsed) and `layout_lines_for_ai`
-    # (column-position PRESERVING - see ocr_pipeline._normalize_preserve_
-    # layout) are reconstructed from `ocr_text` using ocr_pipeline's own
-    # (unmodified) helpers, built from the SAME filtered raw/normalized
-    # pairs so the two stay index-aligned - exactly the same two lists
-    # extract_financial_values() itself builds internally, so
-    # source_line_number in `extracted` indexes into both correctly.
-    # Kept as a local reconstruction here rather than a new return value
-    # from extract_financial_values(), so ocr_pipeline.py's extraction
-    # logic and its function signature are untouched by this phase.
-    # layout_lines_for_ai lets ai_validation.py re-locate each section's
-    # real table header and year-to-column mapping (Phase 2D) instead of
-    # asking the model to infer table structure from collapsed text.
+    # `lines_for_ai`/`layout_lines_for_ai` were already built above
+    # (before population, for the AI mapping step) - reused here as-is,
+    # not rebuilt.
     # ------------------------------------------------------------
-    raw_and_normalized = [
-        (raw, ocr_pipeline.normalize_text(raw)) for raw in ocr_text.splitlines()
-    ]
-    raw_and_normalized = [(raw, norm) for raw, norm in raw_and_normalized if norm]
-    lines_for_ai = [norm for _raw, norm in raw_and_normalized]
-    layout_lines_for_ai = [
-        ocr_pipeline._normalize_preserve_layout(raw) for raw, _norm in raw_and_normalized
-    ]
-
     _notify(status_callback, "ai_validation", "processing")
     try:
         ai_results, ai_presence_results, ai_availability = ai_validation.validate_extracted_fields(
@@ -477,4 +521,9 @@ def process_uploaded_pdf(pdf_path, original_filename, status_callback=None):
         "correction_detail": correction_detail,
         "correction_technical_counts": correction_technical_counts,
         "correction_proposal_counts": correction_proposal_counts,
+        "ai_mapping_results": ai_mapping_results,
+        "ai_mapping_available": ai_mapping_available,
+        "ai_mapping_detail": ai_mapping_availability.detail if ai_mapping_availability is not None else "No fields required a mapping attempt.",
+        "ai_mapping_technical_counts": ai_mapping_technical_counts,
+        "ai_mapping_status_counts": ai_mapping_status_counts,
     }

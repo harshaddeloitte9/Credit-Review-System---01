@@ -120,17 +120,16 @@ def build_credit_memo(fa, risk, covenants_result, collateral_result, limit_resul
     fb_status = _fmt_cr_or_review(fb_result.fb_requirement if fb_result else None)
     nfb_status = _fmt_cr_or_review(nfb_result.assessed_nfb_limit if nfb_result else None)
 
-    # "Area N" labels below match the app's CURRENT sidebar navigation
-    # position for each area (Data Upload=1, Input & Validation=2,
-    # Financial Analysis=3, Covenant Monitoring=4, Collateral Assessment=5,
-    # Limit Setting=6, Portfolio Monitoring=7, Credit Memo=8, Risk
-    # Scoring=9) - not the original reference workbook's own sheet
-    # numbers ('2-Financial Analysis', '3-Risk Scoring', etc.), which no
-    # longer match since Risk Scoring moved to the end of the app's
-    # navigation as an "Additional Feature". Risk Scoring's own card is
-    # likewise placed last in this list, matching that same repositioning,
-    # rather than appearing second (right after Financial Analysis) as it
-    # did under the old sheet-based ordering.
+    # "Area N" labels below are a legacy numbering independent of the
+    # app's current sidebar nav position (which has since gained a "Data
+    # Review" step and renumbered further) - not the original reference
+    # workbook's own sheet numbers either ('2-Financial Analysis',
+    # '3-Risk Scoring', etc.), which stopped matching once Risk Scoring
+    # moved to the end of the app's navigation as an "Additional
+    # Feature". These labels are simply fixed, human-readable area names
+    # at this point - kept as-is rather than renumbered again, since
+    # several tests key off these exact strings and they carry no
+    # behavioral meaning of their own.
     areas = [
         CreditMemoArea("Area 3 - Financial Analysis & Interpretation", fa.overall_status, commentary["financial_analysis"]),
         CreditMemoArea("Area 4 - Covenant Assessment — Financial Covenants", covenants_result.overall_status, commentary["covenants"]),

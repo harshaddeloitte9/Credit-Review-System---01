@@ -47,21 +47,22 @@ def _ok(cond, msg):
 
 
 AREAS = [
-    "1. Data Upload", "2. Input & Validation", "3. Financial Analysis",
-    "4. Covenant Monitoring", "5. Collateral Assessment", "6. Limit Setting",
-    "7. Portfolio Monitoring", "8. Credit Memo", "9. Risk Scoring",
+    "1. Data Upload", "2. Data Review", "3. Input & Validation", "4. Financial Analysis",
+    "5. Covenant Monitoring", "6. Collateral Assessment", "7. Limit Setting",
+    "8. Portfolio Monitoring", "9. Credit Memo", "10. Risk Scoring",
 ]
 
 # (area index, exact button label per the director's spec)
 STAGE_BUTTONS = [
-    (1, "Accept & Continue →"),
-    (2, "Accept Analysis & Continue →"),
-    (3, "Accept Assessment & Continue →"),
-    (4, "Accept & Continue →"),
-    (5, "Accept Limits & Continue →"),
-    (6, "Accept & Continue →"),
-    (7, "Complete Review →"),
-    (8, "Finish →"),
+    (1, "Continue to Analysis →"),
+    (2, "Accept & Continue →"),
+    (3, "Accept Analysis & Continue →"),
+    (4, "Accept Assessment & Continue →"),
+    (5, "Accept & Continue →"),
+    (6, "Accept Limits & Continue →"),
+    (7, "Accept & Continue →"),
+    (8, "Complete Review →"),
+    (9, "Finish →"),
 ]
 
 
@@ -138,10 +139,10 @@ def main():
     # Sidebar navigation still works normally after using the buttons
     # (C) - jump directly to an arbitrary page via the sidebar.
     # ------------------------------------------------------------------
-    at.sidebar.radio[0].set_value("5. Collateral Assessment")
+    at.sidebar.radio[0].set_value("6. Collateral Assessment")
     at.run(timeout=60)
     _ok(not at.exception, f"sidebar navigation after button use: no exception: {[str(e) for e in at.exception]}")
-    _ok(at.session_state["selected_area"] == "5. Collateral Assessment",
+    _ok(at.session_state["selected_area"] == "6. Collateral Assessment",
         "sidebar click after prior button use still updates the same shared nav state correctly")
 
     # ------------------------------------------------------------------
@@ -152,7 +153,7 @@ def main():
     # the SAME thing survives a button-driven, not just sidebar-driven,
     # navigation cycle).
     # ------------------------------------------------------------------
-    at.sidebar.radio[0].set_value("6. Limit Setting")
+    at.sidebar.radio[0].set_value("7. Limit Setting")
     at.run(timeout=60)
     for w in at.number_input:
         if w.key == "_fb_annual_sales_widget":
@@ -160,14 +161,14 @@ def main():
     at.run(timeout=60)
     _ok(at.session_state["fb_annual_sales"] == 77777.0, "manually set Annual Sales before testing Previous Step")
 
-    _click_prev(at, 5)  # Limit Setting is index 5 -> previous should be Collateral Assessment (index 4)
+    _click_prev(at, 6)  # Limit Setting is index 6 -> previous should be Collateral Assessment (index 5)
     _ok(not at.exception, f"'<- Previous Step' click: no exception: {[str(e) for e in at.exception]}")
-    _ok(at.session_state["selected_area"] == "5. Collateral Assessment",
-        f"'<- Previous Step' from Limit Setting (index 5) returns to Collateral Assessment (index 4) - got {at.session_state['selected_area']}")
-    _ok(at.sidebar.radio[0].value == "5. Collateral Assessment",
+    _ok(at.session_state["selected_area"] == "6. Collateral Assessment",
+        f"'<- Previous Step' from Limit Setting (index 6) returns to Collateral Assessment (index 5) - got {at.session_state['selected_area']}")
+    _ok(at.sidebar.radio[0].value == "6. Collateral Assessment",
         "sidebar reflects the Previous-Step navigation too (same shared state)")
 
-    at.sidebar.radio[0].set_value("6. Limit Setting")
+    at.sidebar.radio[0].set_value("7. Limit Setting")
     at.run(timeout=60)
     _ok(at.session_state["fb_annual_sales"] == 77777.0,
         f"Annual Sales (77777.0) survived the Previous-Step round trip - got {at.session_state['fb_annual_sales']}")
@@ -179,7 +180,7 @@ def main():
     # ------------------------------------------------------------------
     area_labels = list(at.sidebar.radio[0].options)
     _ok(sum(1 for a in area_labels if "Risk Scoring" in a) == 1, "'Risk Scoring' still appears exactly once")
-    _ok(area_labels[-1] == "9. Risk Scoring", "'Risk Scoring' is still the LAST nav item")
+    _ok(area_labels[-1] == "10. Risk Scoring", "'Risk Scoring' is still the LAST nav item")
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -197,7 +198,7 @@ def main():
         if w.key == "nav_next_0":
             fresh_button = w
     _ok(fresh_button is not None, "Data Upload shows its continue button even with no data uploaded yet")
-    _ok(fresh_button is not None and fresh_button.label == "Continue to Validation →",
+    _ok(fresh_button is not None and fresh_button.label == "Continue to Review →",
         f"Data Upload's button carries the exact requested label - got {fresh_button.label if fresh_button else None!r}")
     _ok(fresh_button is not None and fresh_button.disabled is True,
         "Data Upload's continue button is DISABLED when no document has been processed yet")

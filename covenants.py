@@ -62,6 +62,13 @@ class CovenantsResult:
     rows: list
     overall_status: str
     overall_status_note: str = field(default="")
+    # Exposed so callers (app.py's Covenant Monitoring/Credit Memo pages,
+    # continuous_monitoring's wiring) read ONE shared breach determination
+    # instead of each re-deriving `any(r.rag in ("AMBER", "RED") ...)`
+    # from raw rows independently - avoids a latent divergence risk if
+    # the RAG vocabulary or evaluability rule ever changes in only one
+    # of several copies.
+    breach: bool = field(default=False)
 
 
 def load_covenant_policy(workbook_path) -> CovenantPolicy:
@@ -136,4 +143,4 @@ def build_covenants(fa, policy: CovenantPolicy) -> CovenantsResult:
         overall_status = "PASS"
         note = ""
 
-    return CovenantsResult(rows=rows, overall_status=overall_status, overall_status_note=note)
+    return CovenantsResult(rows=rows, overall_status=overall_status, overall_status_note=note, breach=breach)

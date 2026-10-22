@@ -35,6 +35,8 @@ os.environ["CREDIT_REVIEW_TOOL_ADVANCED_MODE"] = "1"
 
 from streamlit.testing.v1 import AppTest
 
+import ai_correction_proposals
+import ai_dynamic_mapping
 import ai_validation
 import ocr_upload
 from test_upload_pipeline_ui import _load_realistic_ocr_text
@@ -124,6 +126,43 @@ def _upload(at, pdf_bytes):
     at.run(timeout=90)
 
 
+def _patch_other_ai_layers():
+    """This file is scoped to the AI VALIDATION layer only (see module
+    docstring) - ai_dynamic_mapping.py and ai_correction_proposals.py
+    each import check_ollama_availability/call_ollama FROM ai_validation
+    via `from X import Y`, which copies the reference into their OWN
+    namespace at import time - patching ai_validation's copy (as every
+    test below already does) never touches these two modules' own
+    copies. With a correctly-configured, genuinely-installed Ollama
+    model, those two (real, unmocked) functions would otherwise attempt
+    real, slow, non-deterministic inference calls this file was never
+    designed to exercise - mocked here as unavailable (fast, no real
+    call) instead. See test_ai_dynamic_mapping.py / test_ai_correction_
+    proposals.py for those layers' own dedicated tests."""
+    def _unavailable(*a, **k):
+        return ai_validation.OllamaAvailability(False, False, [], "mocked unavailable - out of scope for this test file")
+
+    def _should_not_be_called(*a, **k):
+        raise AssertionError("ai_dynamic_mapping/ai_correction_proposals must never make a real Ollama call in this test file")
+
+    real = {
+        "dynmap_check": ai_dynamic_mapping.check_ollama_availability, "dynmap_call": ai_dynamic_mapping.call_ollama,
+        "corr_check": ai_correction_proposals.check_ollama_availability, "corr_call": ai_correction_proposals.call_ollama,
+    }
+    ai_dynamic_mapping.check_ollama_availability = _unavailable
+    ai_dynamic_mapping.call_ollama = _should_not_be_called
+    ai_correction_proposals.check_ollama_availability = _unavailable
+    ai_correction_proposals.call_ollama = _should_not_be_called
+    return real
+
+
+def _restore_other_ai_layers(real):
+    ai_dynamic_mapping.check_ollama_availability = real["dynmap_check"]
+    ai_dynamic_mapping.call_ollama = real["dynmap_call"]
+    ai_correction_proposals.check_ollama_availability = real["corr_check"]
+    ai_correction_proposals.call_ollama = real["corr_call"]
+
+
 def test_valid_response_renders_and_does_not_mutate_extracted_value():
     print("=" * 100)
     print("TEST - valid mocked AI response: correct UI + original value unchanged")
@@ -137,6 +176,7 @@ def test_valid_response_renders_and_does_not_mutate_extracted_value():
     ocr_upload.run_ocr = lambda pdf_path: (realistic_text, {"status_code": 200})
     ai_validation.check_ollama_availability = lambda *a, **k: _available(True)
     ai_validation.call_ollama = _make_fake_call_ollama(flag_field="Revenue from operations")
+    _real_other = _patch_other_ai_layers()
 
     try:
         at = AppTest.from_file("app.py")
@@ -144,15 +184,13 @@ def test_valid_response_renders_and_does_not_mutate_extracted_value():
         _upload(at, b"%PDF-1.4 fake content ai-valid\n" * 20)
         _ok(not at.exception, f"upload page runs with no exception: {[str(e) for e in at.exception]}")
 
-        text = _page_text(at)
-        _ok("AI-Assisted Validation" in text, "AI Validation section renders on the upload summary page")
-        _ok("1 field mismatches" in text, "caption reports exactly one FIELD_MISMATCH result")
-        _ok("Fields flagged for review (1)" in text, "flagged-for-review expander shows exactly 1 field")
-        _ok("Revenue from operations" in text and "FIELD_MISMATCH" in text,
-            "flagged field name and its AI status both appear in the review table")
-        _ok("42%" in text, "the mocked confidence score (0.42) is displayed")
+        review_text = _page_text(at, "2. Data Review")
+        _ok("1 field mismatches" in review_text, "Data Review's AI validation caption reports exactly one FIELD_MISMATCH result")
+        _ok("Revenue from operations" in review_text and "FIELD_MISMATCH" in review_text,
+            "flagged field name and its AI status both appear in the Field-Level Review table")
+        _ok("42%" in review_text, "the mocked confidence score (0.42) is displayed")
 
-        input_val_text = _page_text(at, "2. Input & Validation")
+        input_val_text = _page_text(at, "3. Input & Validation")
         _ok(_KNOWN_REVENUE_CURRENT in input_val_text and _KNOWN_REVENUE_PREVIOUS in input_val_text,
             "Input & Validation still shows the ORIGINAL deterministic Revenue figures unchanged, "
             "despite the AI flagging that field as a FIELD_MISMATCH (advisory-only, never overwrites)")
@@ -160,6 +198,7 @@ def test_valid_response_renders_and_does_not_mutate_extracted_value():
         ocr_upload.run_ocr = real_run_ocr
         ai_validation.check_ollama_availability = real_check_availability
         ai_validation.call_ollama = real_call_ollama
+        _restore_other_ai_layers(_real_other)
 
 
 def test_invalid_json_from_ollama_is_safely_rejected():
@@ -176,6 +215,7 @@ def test_invalid_json_from_ollama_is_safely_rejected():
     ocr_upload.run_ocr = lambda pdf_path: (realistic_text, {"status_code": 200})
     ai_validation.check_ollama_availability = lambda *a, **k: _available(True)
     ai_validation.call_ollama = lambda prompt, model=None, base_url=None, timeout=None: "not valid json {{{"
+    _real_other = _patch_other_ai_layers()
 
     try:
         at = AppTest.from_file("app.py")
@@ -184,15 +224,17 @@ def test_invalid_json_from_ollama_is_safely_rejected():
         _ok(not at.exception, f"upload page runs with no exception on malformed AI response: {[str(e) for e in at.exception]}")
 
         text = _page_text(at)
-        _ok("AI-Assisted Validation" in text, "AI Validation section still renders")
-        _ok("could not be validated (technical error)" in text, "a technical-error count is shown")
-        _ok("INSUFFICIENT_CONTEXT" not in text, "malformed response is never reported as INSUFFICIENT_CONTEXT (that is a content judgement, not a technical failure)")
         _ok("Financial Data Extraction" in text and "Extracted Financial Data" in text,
             "the rest of the upload pipeline (deterministic extraction) completed normally despite the AI failure")
+
+        review_text = _page_text(at, "2. Data Review")
+        _ok("could not be validated (technical error)" in review_text, "a technical-error count is shown on Data Review")
+        _ok("INSUFFICIENT_CONTEXT" not in review_text, "malformed response is never reported as INSUFFICIENT_CONTEXT (that is a content judgement, not a technical failure)")
     finally:
         ocr_upload.run_ocr = real_run_ocr
         ai_validation.check_ollama_availability = real_check_availability
         ai_validation.call_ollama = real_call_ollama
+        _restore_other_ai_layers(_real_other)
 
 
 def test_ollama_unreachable_shows_unavailable_state_no_crash():
@@ -218,6 +260,7 @@ def test_ollama_unreachable_shows_unavailable_state_no_crash():
     ocr_upload.run_ocr = lambda pdf_path: (realistic_text, {"status_code": 200})
     ai_validation.check_ollama_availability = _unreachable
     ai_validation.call_ollama = _should_not_be_called
+    _real_other = _patch_other_ai_layers()
 
     try:
         at = AppTest.from_file("app.py")
@@ -226,15 +269,18 @@ def test_ollama_unreachable_shows_unavailable_state_no_crash():
         _ok(not at.exception, f"upload page runs with no exception when Ollama is unreachable: {[str(e) for e in at.exception]}")
 
         text = _page_text(at)
-        _ok("AI validation did not run for this upload" in text, "a clear, non-crashing 'did not run' message is shown")
-        _ok("Is 'ollama serve' running?" in text, "the specific unreachable-detail reason is surfaced, not a generic message")
         _ok(at.session_state["source_mode"] == "pdf", "the upload pipeline still completes and activates the dataset normally")
         _ok("Financial Data Extraction" in text and "Extracted Financial Data" in text,
             "deterministic extraction is completely unaffected by Ollama being unreachable")
+
+        review_text = _page_text(at, "2. Data Review")
+        _ok("AI validation did not run for this upload" in review_text, "a clear, non-crashing 'did not run' message is shown on Data Review")
+        _ok("Is 'ollama serve' running?" in review_text, "the specific unreachable-detail reason is surfaced, not a generic message")
     finally:
         ocr_upload.run_ocr = real_run_ocr
         ai_validation.check_ollama_availability = real_check_availability
         ai_validation.call_ollama = real_call_ollama
+        _restore_other_ai_layers(_real_other)
 
 
 def test_model_missing_shows_unavailable_state():
@@ -254,6 +300,7 @@ def test_model_missing_shows_unavailable_state():
     ocr_upload.run_ocr = lambda pdf_path: (realistic_text, {"status_code": 200})
     ai_validation.check_ollama_availability = lambda *a, **k: _available(False)
     ai_validation.call_ollama = _should_not_be_called
+    _real_other = _patch_other_ai_layers()
 
     try:
         at = AppTest.from_file("app.py")
@@ -261,14 +308,16 @@ def test_model_missing_shows_unavailable_state():
         _upload(at, b"%PDF-1.4 fake content ai-nomodel\n" * 20)
         _ok(not at.exception, f"upload page runs with no exception when the model is not installed: {[str(e) for e in at.exception]}")
 
-        text = _page_text(at)
-        _ok("AI validation did not run for this upload" in text, "a clear 'did not run' message is shown for a missing model too")
-        _ok("is not installed" in text, "the specific missing-model reason is surfaced")
         _ok(at.session_state["source_mode"] == "pdf", "the upload pipeline still completes and activates the dataset normally")
+
+        review_text = _page_text(at, "2. Data Review")
+        _ok("AI validation did not run for this upload" in review_text, "a clear 'did not run' message is shown for a missing model too, on Data Review")
+        _ok("is not installed" in review_text, "the specific missing-model reason is surfaced")
     finally:
         ocr_upload.run_ocr = real_run_ocr
         ai_validation.check_ollama_availability = real_check_availability
         ai_validation.call_ollama = real_call_ollama
+        _restore_other_ai_layers(_real_other)
 
 
 def main():

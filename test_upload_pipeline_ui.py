@@ -19,6 +19,9 @@ os.environ["CREDIT_REVIEW_TOOL_ADVANCED_MODE"] = "1"
 
 from streamlit.testing.v1 import AppTest
 
+import ai_correction_proposals
+import ai_dynamic_mapping
+import ai_validation
 import ocr_upload
 
 # Isolate this test's OCR cache from any real cache (and from other test
@@ -101,6 +104,46 @@ def _page_text(at):
     return "\n".join(str(t) for t in texts)
 
 
+def _patch_ai_layers_unavailable():
+    """This file tests the upload PIPELINE STAGES (OCR/extraction/
+    population), never AI behavior - ai_validation.py/ai_correction_
+    proposals.py/ai_dynamic_mapping.py each import check_ollama_
+    availability/call_ollama FROM ai_validation via `from X import Y`,
+    which copies the reference into their own namespace at import time,
+    so each needs its own mock. With a genuinely-running, correctly-
+    configured Ollama, leaving these unmocked would make a real upload
+    here attempt real, slow inference this file was never designed to
+    wait on (see test_ai_dynamic_mapping.py/test_ai_validation_ui.py for
+    those layers' own dedicated tests)."""
+    def _unavailable(*a, **k):
+        return ai_validation.OllamaAvailability(False, False, [], "mocked unavailable - out of scope for this test file")
+
+    def _should_not_be_called(*a, **k):
+        raise AssertionError("no AI layer must ever make a real Ollama call in this test file")
+
+    real = {
+        "av_check": ai_validation.check_ollama_availability, "av_call": ai_validation.call_ollama,
+        "acp_check": ai_correction_proposals.check_ollama_availability, "acp_call": ai_correction_proposals.call_ollama,
+        "adm_check": ai_dynamic_mapping.check_ollama_availability, "adm_call": ai_dynamic_mapping.call_ollama,
+    }
+    ai_validation.check_ollama_availability = _unavailable
+    ai_validation.call_ollama = _should_not_be_called
+    ai_correction_proposals.check_ollama_availability = _unavailable
+    ai_correction_proposals.call_ollama = _should_not_be_called
+    ai_dynamic_mapping.check_ollama_availability = _unavailable
+    ai_dynamic_mapping.call_ollama = _should_not_be_called
+    return real
+
+
+def _restore_ai_layers(real):
+    ai_validation.check_ollama_availability = real["av_check"]
+    ai_validation.call_ollama = real["av_call"]
+    ai_correction_proposals.check_ollama_availability = real["acp_check"]
+    ai_correction_proposals.call_ollama = real["acp_call"]
+    ai_dynamic_mapping.check_ollama_availability = real["adm_check"]
+    ai_dynamic_mapping.call_ollama = real["adm_call"]
+
+
 def test_successful_upload_shows_real_pipeline():
     real_run_ocr = ocr_upload.run_ocr
     realistic_text = _load_realistic_ocr_text()
@@ -108,6 +151,7 @@ def test_successful_upload_shows_real_pipeline():
     def _fake_run_ocr(pdf_path):
         return realistic_text, {"status_code": 200}
     ocr_upload.run_ocr = _fake_run_ocr
+    _real_ai = _patch_ai_layers_unavailable()
 
     try:
         at = AppTest.from_file("app.py")
@@ -126,6 +170,7 @@ def test_successful_upload_shows_real_pipeline():
         _ok(at.session_state["ocr_reused"] is False, "first upload of this content reports ocr_reused=False (genuinely called OCR)")
     finally:
         ocr_upload.run_ocr = real_run_ocr
+        _restore_ai_layers(_real_ai)
 
 
 def test_ocr_failure_shows_real_error_on_correct_stage():

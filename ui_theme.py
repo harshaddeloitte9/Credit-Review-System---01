@@ -74,6 +74,13 @@ _STATUS_TEXT_KIND = {
     # AI correction proposals (Phase 3A) - content statuses.
     "PROPOSAL_AVAILABLE": "warning", "PROPOSAL_UNVERIFIED": "neutral",
     "PROPOSAL_REJECTED_BY_EVIDENCE": "critical", "NO_PROPOSAL": "neutral",
+    # Deterministic extraction statuses, shown on the Data Review page.
+    "OK": "good", "NOT_FOUND": "neutral", "REVIEW_REQUIRED": "warning",
+    "HUMAN_APPROVED_CORRECTION": "good",
+    # AI dynamic field mapping (this phase) - content statuses.
+    "AI_MAPPED": "warning", "MAPPED_AND_VERIFIED": "warning",
+    "MAPPED_BUT_REJECTED": "critical", "NO_CANDIDATE_FOUND": "neutral",
+    "AI_ROW_SELECTED_VALUES_UNRESOLVED": "neutral",
 }
 
 
@@ -194,10 +201,10 @@ def inject_theme():
             color: #ffffff;
             font-weight: 600;
         }}
-        [data-testid="stSidebar"] div[role="radiogroup"] label:nth-of-type(2) {{
+        [data-testid="stSidebar"] div[role="radiogroup"] label:nth-of-type(3) {{
             margin-top: 0.6rem;
         }}
-        [data-testid="stSidebar"] div[role="radiogroup"] label:nth-of-type(2)::before {{
+        [data-testid="stSidebar"] div[role="radiogroup"] label:nth-of-type(3)::before {{
             content: "Credit Analysis";
             display: block;
             font-size: 0.66rem;
@@ -207,12 +214,12 @@ def inject_theme():
             color: {SIDEBAR_MUTED};
             margin: 0.4rem 0 0.45rem 0.55rem;
         }}
-        [data-testid="stSidebar"] div[role="radiogroup"] label:nth-of-type(6) {{
+        [data-testid="stSidebar"] div[role="radiogroup"] label:nth-of-type(7) {{
             margin-top: 1rem;
             padding-top: 1rem;
             border-top: 1px solid rgba(255,255,255,0.10);
         }}
-        [data-testid="stSidebar"] div[role="radiogroup"] label:nth-of-type(6)::before {{
+        [data-testid="stSidebar"] div[role="radiogroup"] label:nth-of-type(7)::before {{
             content: "Decisioning & Monitoring";
             display: block;
             font-size: 0.66rem;
@@ -222,12 +229,12 @@ def inject_theme():
             color: {SIDEBAR_MUTED};
             margin: 0 0 0.45rem 0.55rem;
         }}
-        [data-testid="stSidebar"] div[role="radiogroup"] label:nth-of-type(9) {{
+        [data-testid="stSidebar"] div[role="radiogroup"] label:nth-of-type(10) {{
             margin-top: 1rem;
             padding-top: 1rem;
             border-top: 1px solid rgba(255,255,255,0.10);
         }}
-        [data-testid="stSidebar"] div[role="radiogroup"] label:nth-of-type(9)::before {{
+        [data-testid="stSidebar"] div[role="radiogroup"] label:nth-of-type(10)::before {{
             content: "Additional Features";
             display: block;
             font-size: 0.66rem;
@@ -274,12 +281,12 @@ def inject_theme():
             font-size: 1.08rem;
             font-weight: 700;
             color: {INK_PRIMARY};
-            margin: 2rem 0 0.2rem 0;
+            margin: 1.5rem 0 0.2rem 0;
         }}
         .cr-section-sub {{
             font-size: 0.85rem;
             color: {INK_MUTED};
-            margin-bottom: 1rem;
+            margin-bottom: 0.65rem;
         }}
         .cr-chart-caption {{
             font-size: 0.84rem;
@@ -381,13 +388,15 @@ def inject_theme():
             letter-spacing: 0.03em;
             padding: 0.6rem 0.8rem;
             border-bottom: 1px solid {BORDER};
-            white-space: nowrap;
+            white-space: normal;
         }}
         table.cr-table td {{
             padding: 0.55rem 0.8rem;
             border-bottom: 1px solid {GRIDLINE};
             color: {INK_PRIMARY};
             vertical-align: middle;
+            max-width: 280px;
+            word-break: break-word;
         }}
         table.cr-table tr:last-child td {{ border-bottom: none; }}
         table.cr-table tr:hover td {{ background: {SURFACE_PAGE}; }}
@@ -525,19 +534,30 @@ def inject_theme():
             color: {INK_SECONDARY};
             flex-shrink: 0;
         }}
+        /* Wide screens: one aligned horizontal row, every step the same
+           width (flex-basis 0 -> grow equally regardless of label
+           length), arrows as fixed-width connectors so spacing stays
+           consistent. Narrow screens (see media query below): stacks
+           vertically with the connector rotated into a down-arrow,
+           rather than wrapping mid-row (which would otherwise strand an
+           arrow at the end of one line, disconnected from its step). */
         .cr-flow-row {{
             display: flex;
             align-items: center;
-            gap: 0.8rem;
-            flex-wrap: wrap;
+            justify-content: center;
+            gap: 0;
+            flex-wrap: nowrap;
             background: {SURFACE};
             border: 1px solid {BORDER};
             border-radius: 12px;
-            padding: 1.1rem 1.3rem;
+            padding: 0.85rem 1.1rem;
+            margin-bottom: 0.6rem;
         }}
         .cr-flow-step {{
-            flex: 1 1 160px;
+            flex: 1 1 0;
+            min-width: 0;
             text-align: center;
+            padding: 0 0.5rem;
         }}
         .cr-flow-dot {{
             width: 10px;
@@ -549,16 +569,34 @@ def inject_theme():
             font-weight: 700;
             font-size: 0.88rem;
             color: {INK_PRIMARY};
+            line-height: 1.25;
         }}
         .cr-flow-sub {{
             font-size: 0.76rem;
             color: {INK_MUTED};
             margin-top: 0.15rem;
+            line-height: 1.25;
         }}
         .cr-flow-arrow {{
             font-size: 1.3rem;
             color: {INK_MUTED};
             flex: 0 0 auto;
+            padding: 0 0.5rem;
+        }}
+        @media (max-width: 820px) {{
+            .cr-flow-row {{
+                flex-direction: column;
+                align-items: stretch;
+                padding: 1rem 1.2rem;
+            }}
+            .cr-flow-step {{
+                width: 100%;
+                padding: 0.3rem 0;
+            }}
+            .cr-flow-arrow {{
+                transform: rotate(90deg);
+                padding: 0.2rem 0;
+            }}
         }}
 
         div[data-testid="stExpander"] {{
@@ -613,12 +651,16 @@ def status_kind(status_text):
     return _STATUS_TEXT_KIND.get(status_text, "neutral")
 
 
-def badge_html(text, kind=None):
+def badge_html(text, kind=None, title=None):
+    """title, if given, becomes a native HTML tooltip (no JS) - used to
+    keep a compact/relabelled badge's own precise underlying status
+    reachable on hover/focus rather than only the shortened label."""
     if text is None:
         text = "—"
     kind = kind or status_kind(text)
     colors = STATUS.get(kind, STATUS["neutral"])
-    return f'<span class="cr-badge" style="background:{colors["bg"]};color:{colors["text"]}">{text}</span>'
+    title_attr = f' title="{title}"' if title else ""
+    return f'<span class="cr-badge" style="background:{colors["bg"]};color:{colors["text"]}"{title_attr}>{text}</span>'
 
 
 def render_topbar():
@@ -710,21 +752,31 @@ def render_kpi_row(cards, columns_per_row=3):
                 st.markdown(card, unsafe_allow_html=True)
 
 
-def render_html_table(rows, columns, badge_col=None, numeric_cols=None):
+def render_html_table(rows, columns, badge_col=None, numeric_cols=None, col_widths=None):
+    """col_widths: optional {column_name: css_width} (e.g. "26%" or
+    "220px") - a per-column width HINT for browsers under the table's
+    normal 'auto' layout, so a couple of columns (e.g. one holding a
+    longer description) can be allocated more room than compact count/
+    status columns without forcing every other project table to adopt
+    a rigid fixed layout."""
     numeric_cols = numeric_cols or []
+    col_widths = col_widths or {}
     thead = "".join(
-        f'<th class="{"cr-num" if c in numeric_cols else ""}">{c}</th>' for c in columns
+        f'<th class="{"cr-num" if c in numeric_cols else ""}"'
+        f'{f" style=\"width:{col_widths[c]}\"" if c in col_widths else ""}>{c}</th>'
+        for c in columns
     )
     body = []
     for row in rows:
         cells = []
         for c in columns:
             val = row.get(c, "")
+            width_attr = f' style="width:{col_widths[c]}"' if c in col_widths else ""
             if c == badge_col:
-                cells.append(f"<td>{badge_html(val)}</td>")
+                cells.append(f"<td{width_attr}>{badge_html(val)}</td>")
             else:
                 cls = "cr-num" if c in numeric_cols else ""
-                cells.append(f'<td class="{cls}">{val}</td>')
+                cells.append(f'<td class="{cls}"{width_attr}>{val}</td>')
         body.append(f"<tr>{''.join(cells)}</tr>")
     html = (
         '<div class="cr-table-wrap"><table class="cr-table">'
