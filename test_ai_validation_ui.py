@@ -186,9 +186,18 @@ def test_valid_response_renders_and_does_not_mutate_extracted_value():
 
         review_text = _page_text(at, "2. Data Review")
         _ok("1 field mismatches" in review_text, "Data Review's AI validation caption reports exactly one FIELD_MISMATCH result")
-        _ok("Revenue from operations" in review_text and "FIELD_MISMATCH" in review_text,
-            "flagged field name and its AI status both appear in the Field-Level Review table")
-        _ok("42%" in review_text, "the mocked confidence score (0.42) is displayed")
+
+        # The Field-Level Review table itself no longer shows a per-field
+        # AI Validation Status/Confidence column (removed by request -
+        # the table now only shows Field/Business Glossary/Statement/FY
+        # Current/FY Previous/Deterministic Status) - the underlying AI
+        # flagging/confidence computation is unaffected, confirmed
+        # directly via session_state instead of the removed UI location.
+        ai_results = at.session_state["ai_validation_results"]
+        _ok(ai_results["Revenue from operations"].validation_status == "FIELD_MISMATCH",
+            "the flagged field's AI status is still correctly computed and stored")
+        _ok(ai_results["Revenue from operations"].confidence == 0.42,
+            "the mocked confidence score (0.42) is still correctly computed and stored")
 
         input_val_text = _page_text(at, "3. Input & Validation")
         _ok(_KNOWN_REVENUE_CURRENT in input_val_text and _KNOWN_REVENUE_PREVIOUS in input_val_text,

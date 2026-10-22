@@ -178,26 +178,26 @@ def test_data_review_business_glossary_column_position():
             _ok(field_idx < glossary_idx < statement_idx,
                 f"column order is Field -> Business Glossary -> Statement (indices {field_idx}, {glossary_idx}, {statement_idx})")
 
-        # The primary table stays compact - audit/AI columns moved to the
-        # "Full Field Detail" expander, never duplicated inline too.
+        # The primary table only ever carries these 6 columns - AI/audit
+        # columns were never part of it.
         if table_match:
             for moved_header in ("AI Validation Status", "Source Line", "Correction Proposal", "Review Decision"):
                 _ok(f">{moved_header}<" not in header_html,
-                    f"'{moved_header}' is no longer a column in the compact primary table")
+                    f"'{moved_header}' is not a column in the primary table")
 
-        # Expander labels aren't st.markdown nodes - check via _page_text
-        # (which also collects expander labels) instead of the raw
-        # markdown-only HTML blob.
-        _ok("Full Field Detail" in _page_text(at), "the Full Field Detail expander (glossary + audit trail) is present")
+        # The "Full Field Detail" expander was removed entirely - the
+        # full glossary definition is shown directly in the main table
+        # instead (checked below), not behind a second expander/table.
+        _ok("Full Field Detail" not in _page_text(at), "the separate Full Field Detail expander no longer exists")
 
-        # A real template field's real FULL definition should appear
-        # somewhere on the page (the detail expander), not a fallback or
-        # invented text - even though the primary table only shows a
-        # short snippet.
+        # The real, FULL (untruncated) definition appears directly in
+        # the primary table's own HTML - no ellipsis, no separate detail
+        # view needed to read it.
         _ok("Income earned from the company&#x27;s principal business activities" in html
             or "Income earned from the company's principal business activities" in html
             or "principal business activities" in html,
-            "Revenue from operations' real, FULL glossary definition appears on the page (detail expander)")
+            "Revenue from operations' real, FULL glossary definition appears directly in the primary table")
+        _ok("…" not in html, "no ellipsis/truncation marker appears anywhere on the Data Review page")
 
         _ok(not at.exception, f"Data Review page renders cleanly: {[str(e) for e in at.exception]}")
     finally:

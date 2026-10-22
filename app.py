@@ -1323,22 +1323,13 @@ elif selected_area == AREAS[1]:
         )
 
         _dr_rows = []
-        _dr_detail_rows = []
         for _field, _ed in _dr_extracted.items():
             _ai_r = _dr_ai_results.get(_field)
             _prop = _dr_proposals.get(_field)
             _dec = _dr_approved.get(_field)
 
             _det_status = _ed.get("validation_status")
-            _ai_status = (_ai_r.validation_status or _ai_r.technical_status) if _ai_r is not None else "—"
-            _confidence = f"{_ai_r.confidence:.0%}" if _ai_r is not None and _ai_r.confidence is not None else "—"
             _proposal_status = _prop.proposal_status if _prop is not None else "—"
-            _decision_label = {
-                "accepted": "Accepted", "rejected": "Rejected", "kept_original": "Kept Original",
-            }.get(
-                _dec.get("decision") if _dec else None,
-                "Pending" if _proposal_status in ("PROPOSAL_AVAILABLE", "PROPOSAL_UNVERIFIED") else "—",
-            )
 
             _matches_filter = (
                 _dr_filter == "Show All"
@@ -1352,54 +1343,26 @@ elif selected_area == AREAS[1]:
                 continue
 
             _dr_glossary = field_glossary.get_definition(_field)
-            _dr_glossary_short = (_dr_glossary[:42] + "…") if len(_dr_glossary) > 43 else _dr_glossary
-            # The short snippet keeps the primary table compact, but the
-            # FULL definition is still one hover away (native HTML title
-            # attribute, no JS) - in addition to the "Full Field Detail"
-            # expander below, which stays the click-based, always-
-            # reachable fallback for touch/keyboard users.
-            _dr_glossary_cell = f'<span title="{html.escape(_dr_glossary)}">{html.escape(_dr_glossary_short)}</span>'
             _dr_rows.append({
                 "Field": _field,
-                "Business Glossary": _dr_glossary_cell,
+                "Business Glossary": html.escape(_dr_glossary),
                 "Statement": ocr_pipeline.FIELD_SECTION.get(_field, "—"),
                 "FY Current": fmt_money(_ed.get("fy_current")) if _ed.get("fy_current") is not None else "—",
                 "FY Previous": fmt_money(_ed.get("fy_previous")) if _ed.get("fy_previous") is not None else "—",
                 "Deterministic Status": _det_status,
             })
-            _dr_detail_rows.append({
-                "Field": _field,
-                "Business Glossary": _dr_glossary,
-                "AI Validation Status": _ai_status,
-                "Source Line": _ed.get("source_line_number") if _ed.get("source_line_number") is not None else "—",
-                "Confidence": _confidence,
-                "Correction Proposal": _proposal_status,
-                "Review Decision": _decision_label,
-            })
 
         if _dr_rows:
-            # Primary view: compact, glance-able columns only - field,
-            # a SHORT glossary snippet, statement type, both FY values,
-            # deterministic status. AI Validation Status/Source Line/
-            # Confidence/Correction Proposal/Review Decision (and the
-            # FULL glossary text) move to the "Full Field Detail"
-            # expander below rather than widening this table - nothing
-            # is removed, just not shown twice at the cost of width.
+            # Field, full Business Glossary definition (no truncation -
+            # wraps naturally, row height adjusts), Statement, both FY
+            # values, Deterministic Status.
             render_html_table(
                 _dr_rows,
                 columns=["Field", "Business Glossary", "Statement", "FY Current", "FY Previous", "Deterministic Status"],
                 badge_col="Deterministic Status",
                 numeric_cols=["FY Current", "FY Previous"],
-                col_widths={"Field": "16%", "Business Glossary": "30%", "Statement": "10%"},
+                col_widths={"Field": "14%", "Business Glossary": "38%", "Statement": "10%"},
             )
-            with st.expander(f"Full Field Detail ({len(_dr_detail_rows)} field(s) — glossary, AI validation & audit trail)", expanded=False):
-                render_html_table(
-                    _dr_detail_rows,
-                    columns=["Field", "Business Glossary", "AI Validation Status", "Source Line",
-                             "Confidence", "Correction Proposal", "Review Decision"],
-                    numeric_cols=["Source Line"],
-                    col_widths={"Field": "14%", "Business Glossary": "32%"},
-                )
         else:
             st.caption("No fields match this filter.")
 
