@@ -123,6 +123,17 @@ import ocr_pipeline
 # CONFIGURATION
 # ============================================================
 
+# Which AI provider the three AI layers (this module, ai_dynamic_
+# mapping.py, ai_correction_proposals.py) actually talk to -
+# check_ollama_availability()/call_ollama() below dispatch on this.
+# "ollama" (the default) runs the exact, unmodified code already in
+# both functions; "openai" is an isolated alternative (see
+# openai_provider.py) for testing against a real OpenAI account. Never
+# switches silently - if the selected provider fails, that failure is
+# reported exactly like an Ollama failure always has been (AI_UNAVAILABLE/
+# AI_ERROR), never retried against the other provider.
+AI_PROVIDER = os.environ.get("AI_PROVIDER", "ollama").strip().lower()
+
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 
 # qwen2.5:7b-instruct was Phase 2A's original recommendation, but was
@@ -141,9 +152,22 @@ OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 # installed either way - check_ollama_availability() below always
 # verifies it (or whatever model is configured) is actually present
 # before any call is attempted.
-DEFAULT_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2:latest")
+# Provider-aware: resolves to whichever provider AI_PROVIDER actually
+# selects, each independently configurable/env-overridable, never a
+# single hardcoded assumed model for either provider.
+_OLLAMA_DEFAULT_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2:latest")
+_OPENAI_DEFAULT_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+DEFAULT_MODEL = _OPENAI_DEFAULT_MODEL if AI_PROVIDER == "openai" else _OLLAMA_DEFAULT_MODEL
 
 AVAILABILITY_TIMEOUT = 1.5   # seconds - just checking the API is up
+
+# A remote HTTPS round-trip to OpenAI is never as fast as a local-
+# loopback ping to Ollama (AVAILABILITY_TIMEOUT above) - a separate,
+# more generous timeout for the OpenAI availability check specifically,
+# so a genuinely-reachable OpenAI account is never misreported as
+# unreachable just because 1.5s wasn't enough for the real network
+# round-trip.
+OPENAI_AVAILABILITY_TIMEOUT = float(os.environ.get("OPENAI_AVAILABILITY_TIMEOUT", "10"))
 
 # Per-call timeout. Raised from Phase 2B's 60s: real batches of even a
 # handful of fields regularly exceed that on CPU-only hardware (see
@@ -321,7 +345,18 @@ def check_ollama_availability(model=DEFAULT_MODEL, base_url=OLLAMA_BASE_URL,
                                timeout=AVAILABILITY_TIMEOUT) -> OllamaAvailability:
     """Never raises - any failure to reach/parse Ollama's own API is
     reported as reachable=False with a clear, specific `detail`, so a
-    caller can always show something sensible rather than crash."""
+    caller can always show something sensible rather than crash.
+
+    Despite the name (kept for backward compatibility with every
+    existing caller/mock across ai_dynamic_mapping.py/
+    ai_correction_proposals.py and the whole test suite), this function
+    dispatches on AI_PROVIDER - see openai_provider.py for the
+    alternative. Never falls back to Ollama if the selected provider
+    fails; the failure is reported exactly like an Ollama failure would
+    be."""
+    if AI_PROVIDER == "openai":
+        import openai_provider
+        return openai_provider.check_openai_availability(model=model, timeout=OPENAI_AVAILABILITY_TIMEOUT)
 
     try:
         resp = requests.get(f"{base_url}/api/tags", timeout=timeout)
@@ -370,7 +405,16 @@ def call_ollama(prompt, model=DEFAULT_MODEL, base_url=OLLAMA_BASE_URL, timeout=C
     output. Returns the raw response text (still untrusted at this
     point - _validate_batch_response() below does the real checking).
     Raises OllamaCallError on any network/timeout/non-200/malformed-
-    envelope failure - never returns a fabricated placeholder."""
+    envelope failure - never returns a fabricated placeholder.
+
+    Despite the name (kept for backward compatibility - see
+    check_ollama_availability()'s own docstring above), dispatches on
+    AI_PROVIDER. `timeout` is forwarded as-is to OpenAI too (whatever
+    the caller resolved it to, typically CALL_TIMEOUT - a generous but
+    harmless ceiling for a hosted API as well)."""
+    if AI_PROVIDER == "openai":
+        import openai_provider
+        return openai_provider.call_openai(prompt, model=model, timeout=timeout)
 
     try:
         resp = requests.post(

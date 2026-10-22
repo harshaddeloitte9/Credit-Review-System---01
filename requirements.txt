@@ -2,3 +2,4 @@ streamlit==1.58.0
 openpyxl==3.1.5
 llmwhisperer-client==2.8.0
 plotly==6.8.0
+openai==3.36.1
