@@ -442,10 +442,11 @@ def test_dynamic_mapping_verified_field_shows_review_controls():
         for f in other_not_found:
             _ok(f"accept_map_{f}" not in button_keys, f"no Accept button for the non-verified field '{f}'")
 
-        # The separate correction-proposal workflow renders independently,
-        # unaffected by dynamic mapping having a pending decision.
-        _ok("Correction Proposals Awaiting Decision" in text,
-            "the separate correction-proposal section still renders alongside dynamic mapping")
+        # The separate correction-proposal workflow is redundant with the
+        # dynamic-mapping Review Decisions controls and is no longer shown
+        # in the standard Data Review UI.
+        _ok("Correction Proposals Awaiting Decision" not in text,
+            "the redundant correction-proposal section is hidden from the standard Data Review UI")
 
         # Click Accept and confirm it persists through the existing
         # approved_corrections/session-state workflow.
