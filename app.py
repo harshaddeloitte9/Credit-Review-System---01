@@ -647,6 +647,30 @@ def classify_dynamic_mapping_status(mapping_status, technical_status, decision=N
     return label, kind, (mapping_status or technical_status), key
 
 
+def display_field_status(validation_status, decision=None):
+    """User-facing status text for the Data Review table only.
+
+    The underlying `validation_status` values remain untouched, so the
+    business logic and downstream processing are preserved. This is a
+    presentation-layer conversion to the three labels the consultant
+    requested: OK, Review Required, and Not Found."""
+    decision = decision.get("decision") if isinstance(decision, dict) else None
+
+    if decision == "accepted":
+        return "OK"
+
+    normalized = (validation_status or "").upper()
+    if normalized in {"OK", "HUMAN_APPROVED_CORRECTION"}:
+        return "OK"
+    if normalized in {"REVIEW_REQUIRED", "AI_MAPPED", "MAPPED_AND_VERIFIED"}:
+        return "Review Required"
+    if normalized in {"NOT_FOUND", "NO_CANDIDATE_FOUND", "AI_ROW_SELECTED_VALUES_UNRESOLVED", "MAPPED_BUT_REJECTED", "INSUFFICIENT_CONTEXT"}:
+        return "Not Found"
+    if normalized in {"", None}:
+        return "Not Found"
+    return "Review Required" if normalized else "Not Found"
+
+
 def fmt_proposed_value(value):
     # AI correction/validation proposal values may legitimately be a
     # string "as printed" (e.g. "132,516.66", "(14)") rather than a
@@ -1072,8 +1096,8 @@ if selected_area == AREAS[0]:
                 )
             st.caption("The '1-Input Data' sheet generated from this upload's own OCR text.")
 
-        # ---- Raw OCR Output ---------------------------------------------
-        render_section("Raw OCR Output")
+        # ---- Extracted Text -----------------------------------------------
+        render_section("Extracted Text")
         _raw_ocr_path = st.session_state["raw_ocr_path"]
         if _raw_ocr_path and os.path.exists(_raw_ocr_path):
             _raw_ocr_name = os.path.basename(_raw_ocr_path)
@@ -1096,13 +1120,13 @@ if selected_area == AREAS[0]:
             with dl_col:
                 st.markdown("<div style='margin-top:0.9rem;'></div>", unsafe_allow_html=True)
                 st.download_button(
-                    "Download Raw OCR",
+                    "Download Extracted Text",
                     data=_read_file_bytes(_raw_ocr_path),
                     file_name=_raw_ocr_name,
                     mime="text/plain",
                     width="stretch",
                 )
-            st.caption("The exact LLMWhisperer result_text for this upload, unmodified.")
+            st.caption("Text extracted from the uploaded financial document.")
 
         # ---- Active Data Source -------------------------------------------
         render_section("Active Data Source")
@@ -1349,7 +1373,7 @@ elif selected_area == AREAS[1]:
                 "Statement": ocr_pipeline.FIELD_SECTION.get(_field, "—"),
                 "FY Current": fmt_money(_ed.get("fy_current")) if _ed.get("fy_current") is not None else "—",
                 "FY Previous": fmt_money(_ed.get("fy_previous")) if _ed.get("fy_previous") is not None else "—",
-                "Deterministic Status": _det_status,
+                "Deterministic Status": display_field_status(_det_status, _dec),
             })
 
         if _dr_rows:
@@ -1665,34 +1689,6 @@ elif selected_area == AREAS[1]:
                             _record_mapping_decision(decision="kept_original")
                             st.rerun()
 
-            # Ranking detail: WHY these candidates were shortlisted out of
-            # everything discovered - and, for a field that ended up
-            # NO_CANDIDATE_FOUND/INSUFFICIENT_CONTEXT, whether the true
-            # row might simply have ranked too low to ever be shown to
-            # the model (a retrieval gap) rather than being genuinely
-            # absent from the document. Placed last (collapsed by
-            # default) and after Review Decisions, so it never buries a
-            # pending Accept/Reject/Keep action below unrelated ranking
-            # rows.
-            _dr_ranked_fields = {f: r for f, r in _dr_mapping_results.items() if r.candidate_rankings}
-            if _dr_ranked_fields:
-                with st.expander("AI Candidate Ranking Detail (why these candidates were shortlisted)", expanded=False):
-                    _dr_ranking_rows = []
-                    for _rfield, _rres in _dr_ranked_fields.items():
-                        for _rank, _cand in enumerate(_rres.candidate_rankings, start=1):
-                            _dr_ranking_rows.append({
-                                "Template Field": _rfield,
-                                "Rank": _rank,
-                                "Score": f"{_cand['score']:.2f}",
-                                "Line": _cand["line_number"],
-                                "Candidate Text": _cand["text"][:80],
-                                "Shortlisted?": "✓" if _rank <= _rres.shortlisted_count else "—",
-                                "Selected?": "✓" if _cand["line_number"] == _rres.matched_source_line_number else "—",
-                            })
-                    render_html_table(
-                        _dr_ranking_rows,
-                        columns=["Template Field", "Rank", "Score", "Line", "Candidate Text", "Shortlisted?", "Selected?"],
-                    )
 
     render_stage_nav(1, "Continue to Analysis →")
 

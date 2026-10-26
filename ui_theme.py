@@ -76,6 +76,7 @@ _STATUS_TEXT_KIND = {
     "PROPOSAL_REJECTED_BY_EVIDENCE": "critical", "NO_PROPOSAL": "neutral",
     # Deterministic extraction statuses, shown on the Data Review page.
     "OK": "good", "NOT_FOUND": "neutral", "REVIEW_REQUIRED": "warning",
+    "Review Required": "warning", "Not Found": "neutral",
     "HUMAN_APPROVED_CORRECTION": "good",
     # AI dynamic field mapping (this phase) - content statuses.
     "AI_MAPPED": "warning", "MAPPED_AND_VERIFIED": "warning",

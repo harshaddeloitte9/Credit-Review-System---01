@@ -125,8 +125,12 @@ def test_data_upload_shows_only_five_sections_no_ai_panels():
 
         text = _page_text(at)
         for required in ("Source Document", "Document Extraction", "Extracted Financial Data",
-                          "Raw OCR Output", "Active Data Source"):
+                          "Extracted Text", "Active Data Source"):
             _ok(required in text, f"Data Upload page shows the required '{required}' section")
+        _ok("Text extracted from the uploaded financial document." in text,
+            "the Extracted Text description matches the requested wording")
+        _ok("Download Extracted Text" in [w.label for w in at.button],
+            "the upload page shows the requested Download Extracted Text button label")
 
         for removed in ("AI-Assisted Validation", "AI Mapping Correction Proposals"):
             _ok(removed not in text, f"Data Upload page no longer shows the '{removed}' panel")
@@ -550,15 +554,45 @@ def test_dynamic_mapping_summary_reconciles_with_table():
         _restore_dynamic_mapping_only(real)
 
 
-def test_candidate_ranking_detail_collapsed_by_default():
+def test_field_review_status_labels_are_simplified():
     print()
     print("=" * 100)
-    print("TEST - the AI Candidate Ranking Detail expander is collapsed by default in the source")
+    print("TEST - Data Review's visible field statuses are simplified to OK / Review Required / Not Found")
+    print("=" * 100)
+
+    real_run_ocr = ocr_upload.run_ocr
+    real_ai = _patch_ai_unavailable()
+    realistic_text = _load_realistic_ocr_text()
+    ocr_upload.run_ocr = lambda pdf_path: (realistic_text, {"status_code": 200})
+
+    try:
+        at = AppTest.from_file("app.py")
+        at.run(timeout=60)
+        _upload(at, b"%PDF-1.4 fake content status-labels\n" * 20)
+        _ok(not at.exception, f"upload runs with no exception: {[str(e) for e in at.exception]}")
+
+        html = _raw_markdown_html(at, "2. Data Review")
+        _ok("Review Required" in html, "the visible user-facing label 'Review Required' is shown")
+        _ok("Not Found" in html, "the visible user-facing label 'Not Found' is shown")
+        _ok("OK" in html, "the visible user-facing label 'OK' is shown")
+        _ok("AI_MAPPED" not in html, "internal AI_MAPPED state is not displayed directly in the field table")
+        _ok("REVIEW_REQUIRED" not in html, "internal REVIEW_REQUIRED state is not displayed directly in the field table")
+        _ok("NOT_FOUND" not in html, "internal NOT_FOUND state is not displayed directly in the field table")
+        _ok(not at.exception, f"Data Review page renders cleanly: {[str(e) for e in at.exception]}")
+    finally:
+        ocr_upload.run_ocr = real_run_ocr
+        _restore_ai(real_ai)
+
+
+def test_candidate_ranking_detail_removed_from_standard_ui():
+    print()
+    print("=" * 100)
+    print("TEST - the AI Candidate Ranking Detail expander is no longer shown on the standard Data Review page")
     print("=" * 100)
     with open("app.py", encoding="utf-8") as f:
         source = f.read()
-    _ok('st.expander("AI Candidate Ranking Detail (why these candidates were shortlisted)", expanded=False)' in source,
-        "the ranking-detail expander is explicitly collapsed (expanded=False) by default")
+    _ok('AI Candidate Ranking Detail (why these candidates were shortlisted)' not in source,
+        "the ranking-detail expander is removed from the standard page source")
 
 
 def main():
@@ -569,7 +603,8 @@ def main():
     test_dynamic_mapping_verified_field_shows_review_controls()
     test_dynamic_mapping_skipped_field_shows_correct_reason()
     test_dynamic_mapping_summary_reconciles_with_table()
-    test_candidate_ranking_detail_collapsed_by_default()
+    test_field_review_status_labels_are_simplified()
+    test_candidate_ranking_detail_removed_from_standard_ui()
 
     print()
     if _FAILURES:
