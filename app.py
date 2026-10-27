@@ -804,7 +804,13 @@ _UPLOAD_STAGE_DISPLAY = {
 }
 
 
-def _ai_provider_label(provider_name=None):
+def _ai_provider_label(provider_name=None, detail=None):
+    if provider_name is None and detail:
+        detail_lower = detail.lower()
+        if "openai" in detail_lower:
+            provider_name = "openai"
+        elif "ollama" in detail_lower:
+            provider_name = "ollama"
     provider = (provider_name or getattr(ai_validation, "AI_PROVIDER", "ollama") or "ollama").strip().lower()
     return "OpenAI" if provider == "openai" else "Ollama"
 
@@ -813,13 +819,18 @@ def _ai_unavailable_fallback(provider_name=None):
     return f"{_ai_provider_label(provider_name)} is unavailable."
 
 
-def _render_upload_pipeline(placeholder, stage_states):
+def _render_upload_pipeline(placeholder, stage_states, stage_details=None):
+    stage_details = stage_details or {}
     steps = []
     for key, title in UPLOAD_STAGES:
         raw_state = stage_states.get(key)
+        detail = stage_details.get(key)
         subtitle, kind = _UPLOAD_STAGE_DISPLAY.get(raw_state, ("○ Waiting", "neutral"))
         if raw_state == "skipped":
-            subtitle = f"○ Skipped ({_ai_provider_label()} unavailable)"
+            provider = _ai_provider_label(detail=detail)
+            subtitle = f"○ Skipped ({provider} unavailable)"
+            if detail:
+                subtitle = f"○ Skipped ({provider} unavailable): {detail}"
         steps.append((title, subtitle, kind))
     with placeholder.container():
         render_flow_steps(steps)
@@ -972,13 +983,16 @@ if selected_area == AREAS[0]:
             with st.status("Processing uploaded financial statement...", expanded=True) as _status:
                 st.write(f"Uploading **{_uploaded_pdf.name}**...")
                 _stage_states = {"source": "complete"}
+                _stage_details = {}
                 _pipeline_ph = st.empty()
-                _render_upload_pipeline(_pipeline_ph, _stage_states)
+                _render_upload_pipeline(_pipeline_ph, _stage_states, _stage_details)
                 _stage_titles = dict(UPLOAD_STAGES)
 
                 def _on_stage(stage, state, detail=None):
                     _stage_states[stage] = state
-                    _render_upload_pipeline(_pipeline_ph, _stage_states)
+                    if detail is not None:
+                        _stage_details[stage] = detail
+                    _render_upload_pipeline(_pipeline_ph, _stage_states, _stage_details)
                     if state == "failed":
                         st.session_state["pdf_processing_failed_stage"] = _stage_titles.get(stage, stage)
                         if detail:

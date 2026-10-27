@@ -184,6 +184,15 @@ def test_openai_unavailable_status_uses_openai_label():
         ai_dynamic_mapping.check_ollama_availability = real_adm_check
 
 
+def test_ai_provider_label_uses_detail_when_provider_is_not_set_explicitly():
+    import app
+
+    _ok(app._ai_provider_label(detail="OpenAI API is not reachable.") == "OpenAI",
+        "the skipped-stage label follows the actual provider in the failure detail")
+    _ok(app._ai_provider_label(detail="Ollama is not reachable at http://localhost:11434") == "Ollama",
+        "the skipped-stage label falls back to Ollama when that is the actual provider detail")
+
+
 def test_data_review_business_glossary_column_position():
     print()
     print("=" * 100)
