@@ -7,6 +7,7 @@ from datetime import datetime
 import streamlit as st
 from openpyxl import load_workbook
 
+import ai_validation
 from reference_data import load_reference_bundle, ReferenceDataError
 from workbook_validation import validate_workbook
 import ocr_pipeline
@@ -796,17 +797,29 @@ _UPLOAD_STAGE_DISPLAY = {
     "reused": ("✓ Previously Extracted", "good"),
     "processing": ("⟳ Processing", "processing"),
     "failed": ("✕ Failed", "critical"),
-    # AI validation only - Ollama not running/model not installed for
-    # this run. Never a failure: the deterministic pipeline above is
+    # AI validation only - the configured AI provider was not available
+    # for this run. Never a failure: the deterministic pipeline above is
     # unaffected either way (see ai_validation.py).
-    "skipped": ("○ Skipped (Ollama unavailable)", "neutral"),
+    "skipped": ("○ Skipped (AI provider unavailable)", "neutral"),
 }
+
+
+def _ai_provider_label(provider_name=None):
+    provider = (provider_name or getattr(ai_validation, "AI_PROVIDER", "ollama") or "ollama").strip().lower()
+    return "OpenAI" if provider == "openai" else "Ollama"
+
+
+def _ai_unavailable_fallback(provider_name=None):
+    return f"{_ai_provider_label(provider_name)} is unavailable."
 
 
 def _render_upload_pipeline(placeholder, stage_states):
     steps = []
     for key, title in UPLOAD_STAGES:
-        subtitle, kind = _UPLOAD_STAGE_DISPLAY.get(stage_states.get(key), ("○ Waiting", "neutral"))
+        raw_state = stage_states.get(key)
+        subtitle, kind = _UPLOAD_STAGE_DISPLAY.get(raw_state, ("○ Waiting", "neutral"))
+        if raw_state == "skipped":
+            subtitle = f"○ Skipped ({_ai_provider_label()} unavailable)"
         steps.append((title, subtitle, kind))
     with placeholder.container():
         render_flow_steps(steps)
@@ -1284,24 +1297,33 @@ elif selected_area == AREAS[1]:
         # ---- Extraction Summary -------------------------------------
         render_section("Extraction Summary")
         _dr_status_counts = {}
-        for _ed in _dr_extracted.values():
-            _s = _ed.get("validation_status")
-            _dr_status_counts[_s] = _dr_status_counts.get(_s, 0) + 1
-        _dr_ai_confirmed = sum(1 for r in _dr_ai_results.values() if r.validation_status == "CONFIRMED")
-        _dr_ai_flagged = sum(1 for r in _dr_ai_results.values() if r.requires_review or r.technical_status == "AI_ERROR")
+        for _field, _ed in _dr_extracted.items():
+            _status = display_field_status(_ed.get("validation_status"), _dr_approved.get(_field))
+            _dr_status_counts[_status] = _dr_status_counts.get(_status, 0) + 1
+
+        _dr_ai_confirmed = sum(
+            1 for r in _dr_ai_results.values()
+            if r.technical_status == "AI_COMPLETED" and r.validation_status == "CONFIRMED"
+        )
+        _dr_ai_flagged = sum(
+            1 for r in _dr_ai_results.values()
+            if r.technical_status == "AI_ERROR" or r.requires_review is True
+        )
         _dr_ai_presence_matches = sum(1 for r in _dr_presence_results.values() if r.presence_status == "FOUND_POSSIBLE_MATCH")
         _dr_correction_count = sum(1 for p in _dr_proposals.values() if p.proposal_status in ("PROPOSAL_AVAILABLE", "PROPOSAL_UNVERIFIED"))
         _dr_approved_count = sum(1 for dec in _dr_approved.values() if dec.get("decision") == "accepted")
+        _dr_review_required_count = _dr_status_counts.get("Review Required", 0)
+        _dr_not_found_count = _dr_status_counts.get("Not Found", 0)
 
         render_kpi_row([
             kpi_card_html("Total Fields", str(len(_dr_extracted))),
             kpi_card_html("Successfully Extracted", str(_dr_status_counts.get("OK", 0))),
             kpi_card_html(
-                "Review Required", str(_dr_status_counts.get("REVIEW_REQUIRED", 0)),
-                icon="!" if _dr_status_counts.get("REVIEW_REQUIRED", 0) else "✓",
-                icon_kind="warning" if _dr_status_counts.get("REVIEW_REQUIRED", 0) else "good",
+                "Review Required", str(_dr_review_required_count),
+                icon="!" if _dr_review_required_count else "✓",
+                icon_kind="warning" if _dr_review_required_count else "good",
             ),
-            kpi_card_html("Not Found", str(_dr_status_counts.get("NOT_FOUND", 0))),
+            kpi_card_html("Not Found", str(_dr_not_found_count)),
             kpi_card_html("AI Confirmed", str(_dr_ai_confirmed)),
             kpi_card_html("AI Flagged", str(_dr_ai_flagged), icon_kind="warning" if _dr_ai_flagged else "good"),
             kpi_card_html("AI Presence Matches", str(_dr_ai_presence_matches)),
@@ -1324,7 +1346,7 @@ elif selected_area == AREAS[1]:
         if not st.session_state.get("ai_validation_available"):
             st.caption(
                 f"AI validation did not run for this upload — "
-                f"{st.session_state.get('ai_validation_detail') or 'Ollama is unavailable.'} "
+                f"{st.session_state.get('ai_validation_detail') or _ai_unavailable_fallback()} "
                 "The deterministic statuses below are unaffected."
             )
         else:
@@ -1342,7 +1364,7 @@ elif selected_area == AREAS[1]:
             )
 
         _dr_filter = st.radio(
-            "Filter", ["Show All", "Review Required", "AI Flagged", "NOT_FOUND", "Correction Proposed", "Approved"],
+            "Filter", ["Show All", "Review Required", "Not Found", "Correction Proposed", "Approved"],
             horizontal=True, label_visibility="collapsed", key="data_review_filter",
         )
 
@@ -1353,13 +1375,13 @@ elif selected_area == AREAS[1]:
             _dec = _dr_approved.get(_field)
 
             _det_status = _ed.get("validation_status")
+            _visible_status = display_field_status(_det_status, _dec)
             _proposal_status = _prop.proposal_status if _prop is not None else "—"
 
             _matches_filter = (
                 _dr_filter == "Show All"
-                or (_dr_filter == "Review Required" and _det_status == "REVIEW_REQUIRED")
-                or (_dr_filter == "AI Flagged" and _ai_r is not None and (_ai_r.requires_review or _ai_r.technical_status == "AI_ERROR"))
-                or (_dr_filter == "NOT_FOUND" and _det_status == "NOT_FOUND")
+                or (_dr_filter == "Review Required" and _visible_status == "Review Required")
+                or (_dr_filter == "Not Found" and _visible_status == "Not Found")
                 or (_dr_filter == "Correction Proposed" and _proposal_status in ("PROPOSAL_AVAILABLE", "PROPOSAL_UNVERIFIED"))
                 or (_dr_filter == "Approved" and _dec is not None and _dec.get("decision") == "accepted")
             )
@@ -1429,7 +1451,7 @@ elif selected_area == AREAS[1]:
         elif not st.session_state.get("ai_mapping_available"):
             st.caption(
                 f"AI dynamic mapping did not run for this upload — "
-                f"{st.session_state.get('ai_mapping_detail') or 'Ollama is unavailable.'} "
+                f"{st.session_state.get('ai_mapping_detail') or _ai_unavailable_fallback()} "
                 "These fields remain NOT_FOUND, exactly as the deterministic pipeline left them."
             )
         else:

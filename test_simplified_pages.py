@@ -147,6 +147,43 @@ def test_data_upload_shows_only_five_sections_no_ai_panels():
         _restore_ai(real_ai)
 
 
+def test_openai_unavailable_status_uses_openai_label():
+    print()
+    print("=" * 100)
+    print("TEST - the upload pipeline shows the selected provider name when AI is unavailable")
+    print("=" * 100)
+
+    real_run_ocr = ocr_upload.run_ocr
+    real_provider = ai_validation.AI_PROVIDER
+    real_av_check = ai_validation.check_ollama_availability
+    real_adm_check = ai_dynamic_mapping.check_ollama_availability
+    realistic_text = _load_realistic_ocr_text()
+    ocr_upload.run_ocr = lambda pdf_path: (realistic_text, {"status_code": 200})
+
+    def _fake_openai_unavailable(*a, **k):
+        return ai_validation.OllamaAvailability(False, False, [], "OpenAI API is not reachable.")
+
+    ai_validation.check_ollama_availability = _fake_openai_unavailable
+    ai_dynamic_mapping.check_ollama_availability = _fake_openai_unavailable
+    ai_validation.AI_PROVIDER = "openai"
+
+    try:
+        at = AppTest.from_file("app.py")
+        at.run(timeout=60)
+        _upload(at, b"%PDF-1.4 fake content openai-unavailable\n" * 20)
+        _ok(not at.exception, f"upload runs with no exception: {[str(e) for e in at.exception]}")
+
+        text = _page_text(at)
+        _ok("Skipped (OpenAI unavailable)" in text, "the upload pipeline uses the selected provider name in the unavailable status")
+        _ok("Skipped (Ollama unavailable)" not in text, "the old hardcoded Ollama wording is not shown for an OpenAI-selected run")
+        _ok(not at.exception, f"Data Upload page renders cleanly end to end: {[str(e) for e in at.exception]}")
+    finally:
+        ocr_upload.run_ocr = real_run_ocr
+        ai_validation.AI_PROVIDER = real_provider
+        ai_validation.check_ollama_availability = real_av_check
+        ai_dynamic_mapping.check_ollama_availability = real_adm_check
+
+
 def test_data_review_business_glossary_column_position():
     print()
     print("=" * 100)
