@@ -244,6 +244,29 @@ def _notify(status_callback, stage, state, detail=None):
         status_callback(stage, state, detail)
 
 
+# LLMWhisperer is called with page_separator="<<<" (see
+# _run_llmwhisperer_via_curl): every page of the OCR text ends with a line
+# that is exactly this separator, and normalize_text() keeps that line, so
+# it stays in the same filtered line list every source_line_number indexes.
+OCR_PAGE_SEPARATOR = "<<<"
+
+
+def line_page_numbers(lines):
+    """1-based PDF page number for each entry of `lines` (the filtered,
+    normalized OCR lines that source_line_number / proposal / mapping line
+    numbers all index into). A separator line belongs to the page it ends.
+    Returns None when the text has no page separators at all, so a caller
+    shows "Not available" rather than guessing a page."""
+    if not any(line.strip() == OCR_PAGE_SEPARATOR for line in lines):
+        return None
+    pages, page = [], 1
+    for line in lines:
+        pages.append(page)
+        if line.strip() == OCR_PAGE_SEPARATOR:
+            page += 1
+    return pages
+
+
 def _result_reason(result):
     return getattr(result, "reason", None) or getattr(result, "explanation", None) or ""
 
@@ -392,6 +415,10 @@ def process_uploaded_pdf(pdf_path, original_filename, status_callback=None):
     layout_lines_for_ai = [
         ocr_pipeline._normalize_preserve_layout(raw) for raw, _norm in raw_and_normalized
     ]
+    # Display-only provenance: the PDF page of every line above (index-
+    # aligned with lines_for_ai), so the Data Review UI can show the page
+    # a value came from. Never read by extraction or any calculation.
+    source_line_pages = line_page_numbers(lines_for_ai)
 
     # ------------------------------------------------------------
     # AI-ASSISTED DYNAMIC FIELD MAPPING (this phase) - advisory only,
@@ -603,4 +630,5 @@ def process_uploaded_pdf(pdf_path, original_filename, status_callback=None):
         "ai_mapping_stage_detail": ai_mapping_stage_detail,
         "ai_mapping_technical_counts": ai_mapping_technical_counts,
         "ai_mapping_status_counts": ai_mapping_status_counts,
+        "source_line_pages": source_line_pages,
     }

@@ -226,13 +226,15 @@ def test_ai_dynamic_mapping_explanation_block_renders():
         _upload(at, b"%PDF-1.4 fake content workflow-explanation\n" * 20)
         _ok(not at.exception, f"upload runs with no exception: {[str(e) for e in at.exception]}")
 
+        # Removed by request (Data Review simplification): the AI-role
+        # explanation, the workflow diagram and the explanatory accordion.
         text = _page_text(at, "2. Data Review")
-        _ok("does not generate or directly populate financial figures" in text,
-            "the plain-English AI-role explanation is shown")
-        _ok("Standard Field" in text and "AI-Selected Row" in text and "Human Decision" in text,
-            "the compact workflow (Standard Field -> ... -> Human Decision) is shown")
-        _ok("Accept / Reject / Keep as Not Found mean here" in text,
-            "the Accept/Reject/Keep as Not Found explanations are available")
+        _ok("does not generate or directly populate financial figures" not in text,
+            "the AI-role explanation paragraph is no longer shown")
+        _ok("Human Decision" not in text and "Deterministic Verification" not in text,
+            "the AI Dynamic Field Mapping workflow diagram is no longer shown")
+        _ok("Accept / Reject / Keep as Not Found mean here" not in text,
+            "the explanatory accordion is no longer shown")
 
         _ok(not at.exception, f"Data Review page renders cleanly: {[str(e) for e in at.exception]}")
     finally:
@@ -305,21 +307,23 @@ def test_ai_dynamic_mapping_table_refinement():
         _upload(at, b"%PDF-1.4 fake content table-refinement\n" * 20)
         _ok(not at.exception, f"upload runs with no exception: {[str(e) for e in at.exception]}")
 
+        # The technical AI Dynamic Field Mapping table, summary line and
+        # diagnostics expander were removed from Data Review by request.
+        # The mapping results themselves are still computed and stored.
         text = _page_text(at, "2. Data Review")
-        for header in ("Candidates Found", "Shortlisted", "AI-Selected Row", "Confidence",
-                        "Parsed Values", "Review Status"):
-            _ok(header in text, f"shortened column header '{header}' is present")
-        for old_header in ("Candidates Discovered", "Candidates Shortlisted", "AI-Selected Source Row",
-                           "Deterministically Parsed Values", "Year Mapping", "Population Status"):
-            _ok(old_header not in text, f"old long column header '{old_header}' no longer appears")
+        for header in ("Candidates Found", "Shortlisted", "Parsed Values"):
+            _ok(header not in text, f"removed mapping-table header '{header}' is no longer shown")
+        _ok("field(s) considered" not in text, "the removed mapping summary line is no longer shown")
+        _ok("Technical diagnostics" not in text, "the removed diagnostics expander is no longer shown")
 
-        _ok("field(s) considered" in text, "the concise status summary line is shown by default")
-        _ok("Technical diagnostics" in text, "the detailed technical breakdown is available in its own expander")
-        _ok("No Plausible Candidate" in text, "a declined field's compact Review Status badge is shown in the refined table")
-
-        html = _raw_markdown_html(at, "2. Data Review")
-        _ok('title="NO_CANDIDATE_FOUND"' in html,
-            "the compact Review Status badge still carries the exact underlying status as a hover title - never actually lost")
+        mapping_results = at.session_state["ai_mapping_results"]
+        not_found = [f for f, ed in at.session_state["extracted"].items() if ed.get("validation_status") == "NOT_FOUND"]
+        _ok(mapping_results and set(not_found) <= set(mapping_results),
+            "every NOT_FOUND field still has a stored dynamic-mapping result")
+        _ok(all(r.mapping_status == "NO_CANDIDATE_FOUND" for r in mapping_results.values()),
+            "each declined field's exact underlying status is still recorded")
+        _ok(not any(k.startswith("accept_map_") for k in (w.key for w in at.button)),
+            "no mapping decision is offered when nothing was mapped")
 
         _ok(not at.exception, f"Data Review page renders cleanly: {[str(e) for e in at.exception]}")
     finally:
@@ -426,15 +430,15 @@ def test_dynamic_mapping_verified_field_shows_review_controls():
         at.run(timeout=60)
 
         button_keys = [w.key for w in at.button]
-        _ok("accept_map_Capex" in button_keys, "Accept Mapping button is present for the verified Capex mapping")
-        _ok("reject_map_Capex" in button_keys, "Reject Mapping button is present for the verified Capex mapping")
-        _ok("keep_map_Capex" in button_keys, "Keep as Not Found button is present for the verified Capex mapping")
+        _ok("accept_map_Capex" in button_keys, "Accept button is present for the verified Capex mapping")
+        _ok("reject_map_Capex" in button_keys, "Reject button is present for the verified Capex mapping")
+        _ok("keep_map_Capex" not in button_keys, "Keep as Not Found is not part of the simplified review section")
+        _ok("manual_save_Capex" in button_keys, "Enter Manually is available for the verified Capex mapping")
 
         text = _page_text(at)
-        _ok("Capex" in text, "it is obvious which template field the decision applies to (field name shown)")
-        _ok("Acquisition of property" in text, "the AI-selected source row is shown before the decision")
-        _ok("82%" in text, "the AI row-selection confidence is shown before the decision")
-        _ok("Review Decisions" in text, "pending decisions are under their own clearly-labeled heading")
+        _ok("**Capex**" in text, "it is obvious which template field the decision applies to (field name shown)")
+        _ok("AI-suggested mapping:" in text, "the AI-suggested mapping values are shown before the decision")
+        _ok("Review Required / Correction Proposals" in text, "pending decisions are under their own clearly-labeled heading")
 
         # Other NOT_FOUND fields (declined -> NO_CANDIDATE_FOUND) must
         # NOT get an Accept button of their own.
@@ -442,12 +446,11 @@ def test_dynamic_mapping_verified_field_shows_review_controls():
         for f in other_not_found:
             _ok(f"accept_map_{f}" not in button_keys, f"no Accept button for the non-verified field '{f}'")
 
-        # The separate correction-proposal workflow renders independently,
-        # unaffected by dynamic mapping having a pending decision (restored
-        # after 7f40f7c removed it: proposals cover extracted-but-suspect
-        # fields, which the dynamic-mapping controls never do).
-        _ok("Correction Proposals Awaiting Decision" in text,
-            "the separate correction-proposal section still renders alongside dynamic mapping")
+        # Correction proposals and mapping decisions now share the single
+        # review section; the empty-state message must not appear while a
+        # mapping decision is pending.
+        _ok("No correction proposals require a decision for this document." not in text,
+            "the empty-state message is not shown while a mapping decision is pending")
 
         # Click Accept and confirm it persists through the existing
         # approved_corrections/session-state workflow.
@@ -461,7 +464,7 @@ def test_dynamic_mapping_verified_field_shows_review_controls():
 
         at.sidebar.radio[0].set_value("2. Data Review")
         at.run(timeout=60)
-        _ok("✓ Approved" in _page_text(at), "the Review Status badge reflects the recorded decision after accepting")
+        _ok("**Capex**  ·  ✓ Accepted" in _page_text(at), "the review section reflects the recorded decision after accepting")
 
         _ok(not at.exception, f"Data Review page renders cleanly: {[str(e) for e in at.exception]}")
     finally:
@@ -500,9 +503,14 @@ def test_dynamic_mapping_skipped_field_shows_correct_reason():
         _ok(all(r.technical_status == "AI_SKIPPED" for r in mapping_results.values()),
             "fixture sanity check: every field is genuinely AI_SKIPPED with a zero time budget")
 
+        # The per-field mapping status table was removed from Data Review;
+        # the skipped reason is still recorded for every field.
         text = _page_text(at, "2. Data Review")
-        _ok("AI Skipped — Time Budget Exhausted" in text, "the skipped reason is shown clearly, not a generic/misleading label")
-        _ok("No Plausible Candidate" not in text, "a skipped (never attempted) field is never mislabeled as having no candidate")
+        _ok(all("time budget" in r.reason for r in mapping_results.values()),
+            "the skipped reason (time budget exhausted) is recorded for every skipped field")
+        _ok(all(r.mapping_status is None for r in mapping_results.values()),
+            "a skipped (never attempted) field is never recorded as having no candidate")
+        _ok("No Plausible Candidate" not in text, "a skipped field is never shown as having no candidate")
 
         button_keys = [w.key for w in at.button]
         _ok(not any(k.startswith("accept_map_") for k in button_keys), "no Accept button exists for any skipped field")
@@ -535,20 +543,22 @@ def test_dynamic_mapping_summary_reconciles_with_table():
         _upload(at, b"%PDF-1.4 fake content reconciliation\n" * 20)
         _ok(not at.exception, f"upload runs with no exception: {[str(e) for e in at.exception]}")
 
+        # The mapping summary caption was removed from Data Review by
+        # request; the same per-field classification it used still
+        # reconciles with the stored results.
+        import app
+
         text = _page_text(at, "2. Data Review")
-        m = re.search(
-            r"(\d+) field\(s\) considered — (\d+) awaiting your approval, (\d+) already decided, "
-            r"(\d+) no plausible candidate, (\d+) skipped \(time budget\), (\d+) need attention",
-            text,
-        )
-        _ok(m is not None, "fixture sanity check: the concise summary caption was found on the page")
-        if m:
-            total, awaiting, decided, no_candidate, skipped, needs_attention = (int(g) for g in m.groups())
-            _ok(total == len(at.session_state["ai_mapping_results"]),
-                f"the summary's own total ({total}) matches the real number of fields considered ({len(at.session_state['ai_mapping_results'])})")
-            _ok(awaiting + decided + no_candidate + skipped + needs_attention == total,
-                f"the five summary buckets add up to the total ({awaiting}+{decided}+{no_candidate}+{skipped}+{needs_attention} == {total})")
-            _ok(awaiting >= 1, "at least one field (Capex) is genuinely awaiting approval in this fixture")
+        _ok("field(s) considered" not in text, "the removed mapping summary caption is no longer shown")
+        mapping_results = at.session_state["ai_mapping_results"]
+        keys = [
+            app.classify_dynamic_mapping_status(r.mapping_status, r.technical_status, None)[3]
+            for r in mapping_results.values()
+        ]
+        _ok(len(keys) == len(mapping_results), "every considered field is classified exactly once")
+        _ok(keys.count("awaiting_approval") >= 1, "at least one field (Capex) is genuinely awaiting approval in this fixture")
+        _ok(keys.count("awaiting_approval") == sum(1 for w in at.button if w.key.startswith("accept_map_")),
+            "every field awaiting approval has exactly one Accept control in the review section")
 
         _ok(not at.exception, f"Data Review page renders cleanly: {[str(e) for e in at.exception]}")
     finally:
@@ -1026,24 +1036,37 @@ def _data_review(patch, tag, text=None):
 
 
 _NOT_NEEDED_CAPTION = "No fields required a dynamic-mapping attempt"
+_DID_NOT_RUN = "AI dynamic mapping did not run"
 
 
 def _warnings(at):
     return "\n".join(str(w.value) for w in at.warning)
 
 
+def _shows(at, text):
+    """True if `text` is on the page. A plain bool, so a failing assert
+    never prints the page (which contains extracted figures)."""
+    return text in _page_text(at)
+
+
+# The simplified Data Review page shows ONE short line only when AI
+# dynamic mapping did not complete, and nothing when it did or was not
+# needed. It never claims "nothing was needed" (a crash also leaves the
+# mapping results empty).
+
 def test_data_review_mapping_exception_is_not_reported_as_not_needed():
     at = _data_review(_AiPatch(map_missing=_crashing_map), "map-crash")
     assert at.session_state["ai_mapping_results"] == {}
     assert "AI dynamic mapping failed for this upload" in _warnings(at)
     assert "mocked mapping crash" in _warnings(at)
-    assert _NOT_NEEDED_CAPTION not in _page_text(at)
+    assert not _shows(at, _NOT_NEEDED_CAPTION), "a crash was reported as 'not needed'"
 
 
 def test_data_review_mapping_not_needed():
     at = _data_review(_AiPatch(map_missing=_fake_map(lambda nf: ({}, None))), "map-not-needed")
-    assert _NOT_NEEDED_CAPTION in _page_text(at)
+    assert at.session_state["ai_mapping_stage_state"] == "not_needed"
     assert "dynamic mapping" not in _warnings(at).lower()
+    assert not _shows(at, _DID_NOT_RUN), "a not-needed mapping was reported as not running"
 
 
 def test_data_review_mapping_all_calls_failed():
@@ -1052,14 +1075,13 @@ def test_data_review_mapping_all_calls_failed():
 
     at = _data_review(_AiPatch(map_missing=_fake_map(_build)), "map-all-failed")
     assert "AI dynamic mapping was attempted but no AI call succeeded" in _warnings(at)
-    assert _NOT_NEEDED_CAPTION not in _page_text(at)
+    assert not _shows(at, _NOT_NEEDED_CAPTION), "a failed mapping was reported as 'not needed'"
 
 
 def test_data_review_mapping_unavailable():
     at = _data_review(_AiPatch(check=_unavailable("connection refused (mocked)")), "map-unavailable")
-    text = _page_text(at)
-    assert "AI dynamic mapping did not run for this upload — connection refused (mocked)" in text
-    assert _NOT_NEEDED_CAPTION not in text
+    assert _shows(at, "AI dynamic mapping did not run for this upload — connection refused (mocked)")
+    assert not _shows(at, _NOT_NEEDED_CAPTION)
     assert "dynamic mapping" not in _warnings(at).lower()
 
 
@@ -1068,10 +1090,9 @@ def test_data_review_mapping_succeeded():
         return {f: _mapping_result(f, ai_validation.AI_COMPLETED, "NO_CANDIDATE_FOUND") for f in nf}, _available()
 
     at = _data_review(_AiPatch(map_missing=_fake_map(_build)), "map-success")
-    text = _page_text(at)
-    assert "field(s) considered" in text
-    assert _NOT_NEEDED_CAPTION not in text
+    assert at.session_state["ai_mapping_stage_state"] == "complete"
     assert "dynamic mapping" not in _warnings(at).lower()
+    assert not _shows(at, _DID_NOT_RUN) and not _shows(at, _NOT_NEEDED_CAPTION)
 
 
 # ---- ISSUE 3: provider-specific wording ----------------------------
@@ -1257,23 +1278,45 @@ def test_summary_three_confirmed_one_year_mismatch_rest_skipped():
     assert summary["statuses"] == {"CONFIRMED": 3, "YEAR_MISMATCH": 1}
 
 
+_SUMMARY_CARDS = ("Total Fields", "Successfully Extracted", "Review Required", "Not Found")
+_REMOVED_CARDS = ("AI Confirmed", "AI Flagged", "AI Not Validated", "AI Technical Errors",
+                  "AI Presence Matches", "Correction Proposals", "Approved Corrections")
+
+
+def _stored_ai_buckets(at):
+    """The AI buckets are no longer shown on Data Review, but the results
+    are still computed and stored - checked with the same function the
+    removed cards used."""
+    return ai_validation.summarize_validation_results(at.session_state["ai_validation_results"])["buckets"]
+
+
+def test_data_review_shows_only_the_four_summary_cards():
+    at = _data_review(_AiPatch(validate=_make_fake_validate(_three_confirmed_one_mismatch_plan)), "four-cards")
+    k = _kpis(at)
+    assert tuple(k) == _SUMMARY_CARDS, "Extraction Summary must show exactly the four deterministic cards"
+    assert k["Total Fields"] == _SYNTHETIC_OK + _SYNTHETIC_NOT_FOUND
+    assert k["Successfully Extracted"] == _SYNTHETIC_OK
+    assert k["Review Required"] == 0
+    assert k["Not Found"] == _SYNTHETIC_NOT_FOUND
+    for label in _REMOVED_CARDS:
+        assert label not in k, f"removed card {label!r} is still shown"
+    for removed_text in ("validated by AI", "AI validation by field", "AI Dynamic Field Mapping",
+                         "What do Accept / Reject / Keep", "Technical diagnostics", "Deterministic Verification"):
+        assert not _shows(at, removed_text), f"removed explanatory content {removed_text!r} is still shown"
+
+
 def test_data_review_metrics_three_confirmed_one_year_mismatch():
     at = _data_review(_AiPatch(validate=_make_fake_validate(_three_confirmed_one_mismatch_plan)), "metrics")
     k = _kpis(at)
-    not_validated = _SYNTHETIC_OK - 4
     assert k["Total Fields"] == _SYNTHETIC_OK + _SYNTHETIC_NOT_FOUND
     assert k["Successfully Extracted"] == _SYNTHETIC_OK
     assert k["Not Found"] == _SYNTHETIC_NOT_FOUND
-    assert k["AI Confirmed"] == 3, "AI Confirmed count"
-    assert k["AI Flagged"] == 1, "AI Flagged count"
-    assert k["AI Not Validated"] == not_validated, "AI Not Validated count"
-    assert k["AI Technical Errors"] == 0, "AI Technical Errors count"
 
-    text = _page_text(at)
-    assert f"4 validated by AI (3 confirmed, 1 flagged, 0 inconclusive), {not_validated} not validated" in text, \
-        "AI summary caption counts"
-    assert "1 year mismatches" in text, "year-mismatch count in caption"
-    assert "AI validation by field (4 field(s) with an AI result)" in text, "per-field AI expander"
+    buckets = _stored_ai_buckets(at)
+    assert buckets["confirmed"] == 3, "AI confirmed count"
+    assert buckets["flagged"] == 1, "AI flagged count"
+    assert buckets["skipped"] + buckets["unavailable"] == _SYNTHETIC_OK - 4, "AI not-validated count"
+    assert buckets["error"] == 0, "AI technical-error count"
 
     # Deterministic status is untouched by the AI flag.
     results = at.session_state["ai_validation_results"]
@@ -1288,13 +1331,12 @@ def test_data_review_counts_technical_errors_separately():
                 fields[2]: (E, None, None), fields[3]: (E, None, None)}
 
     at = _data_review(_AiPatch(validate=_make_fake_validate(_plan)), "tech-errors")
-    k = _kpis(at)
-    assert k["AI Confirmed"] == 1, "the CONFIRMED+requires_review result must be flagged instead"
-    assert k["AI Flagged"] == 1, "technical errors must not be counted as flagged"
-    assert k["AI Technical Errors"] == 2, "AI Technical Errors count"
-    assert k["AI Not Validated"] == _SYNTHETIC_OK - 4, "AI Not Validated count"
-    assert k["Successfully Extracted"] == _SYNTHETIC_OK, "deterministic OK count unaffected"
-    assert "2 could not be validated (technical error)" in _page_text(at), "technical-error caption"
+    buckets = _stored_ai_buckets(at)
+    assert buckets["confirmed"] == 1, "the CONFIRMED+requires_review result must be flagged instead"
+    assert buckets["flagged"] == 1, "technical errors must not be counted as flagged"
+    assert buckets["error"] == 2, "AI technical-error count"
+    assert buckets["skipped"] + buckets["unavailable"] == _SYNTHETIC_OK - 4, "AI not-validated count"
+    assert _kpis(at)["Successfully Extracted"] == _SYNTHETIC_OK, "deterministic OK count unaffected"
 
 
 def test_new_upload_does_not_inherit_previous_ai_results():
@@ -1328,8 +1370,8 @@ def test_new_upload_does_not_inherit_previous_ai_results():
             at.run(timeout=60)
         results = at.session_state["ai_validation_results"]
         assert all(r.technical_status == ai_validation.AI_UNAVAILABLE for r in results.values())
-        k = _kpis(at)
-        assert k["AI Confirmed"] == 0 and k["AI Flagged"] == 0, "stale AI counts after a new upload"
+        buckets = _stored_ai_buckets(at)
+        assert buckets["confirmed"] == 0 and buckets["flagged"] == 0, "stale AI counts after a new upload"
     finally:
         ocr_upload.run_ocr = real_run_ocr
 
@@ -1365,16 +1407,45 @@ def _click_button(at, key):
     raise AssertionError(f"button {key!r} not found on the Data Review page")
 
 
+_REVIEW_SECTION = "Review Required / Correction Proposals"
+_NO_DECISIONS = "No correction proposals require a decision for this document."
+
+
+def _review_table(at):
+    """{field: {"page": ..., "status": ...}} for the rows currently shown in
+    the Field-Level Review table (the one with the PDF Page No. column)."""
+    html_text = _raw_markdown_html(at)
+    match = re.search(r"<thead><tr>(.*?PDF Page No\..*?)</tr></thead><tbody>(.*?)</tbody>", html_text, re.S)
+    if match is None and _shows(at, "No fields match this filter."):
+        return {}
+    assert match is not None, "Field-Level Review table not found"
+    headers = re.findall(r"<th[^>]*>(.*?)</th>", match.group(1))
+    rows = {}
+    for row_html in re.findall(r"<tr>(.*?)</tr>", match.group(2), re.S):
+        cells = dict(zip(headers, re.findall(r"<td[^>]*>(.*?)</td>", row_html, re.S)))
+        rows[cells["Field"]] = {"page": cells["PDF Page No."], "status": re.sub(r"<[^>]+>", "", cells["Deterministic Status"])}
+    return rows
+
+
+def _set_filter(at, value):
+    at.radio(key="data_review_filter").set_value(value)
+    at.run(timeout=60)
+
+
 def test_correction_proposal_section_renders_with_original_button_keys():
     at = _data_review(_AiPatch(corrections=_swap_proposal_generator), "proposal-render")
-    assert "Correction Proposals Awaiting Decision" in _page_text(at)
+    assert _shows(at, _REVIEW_SECTION)
+    assert not _shows(at, _NO_DECISIONS), "the empty-state message is shown alongside a proposal"
     keys = {w.key for w in at.button}
-    for prefix in ("accept", "reject", "keep"):
+    for prefix in ("accept", "reject"):
         assert f"{prefix}_{_PROPOSAL_FIELD}" in keys, f"{prefix} button missing"
+    assert f"keep_{_PROPOSAL_FIELD}" not in keys, "Keep Original is not part of the simplified section"
+    assert f"manual_save_{_PROPOSAL_FIELD}" in keys, "Enter Manually is missing"
     # The proposal is decided here, not through the dynamic-mapping controls.
     assert f"accept_map_{_PROPOSAL_FIELD}" not in keys
-    k = _kpis(at)
-    assert k["Correction Proposals"] == 1 and k["Approved Corrections"] == 0
+    # The Correction Proposed filter shows exactly the proposed field.
+    _set_filter(at, "Correction Proposed")
+    assert list(_review_table(at)) == [_PROPOSAL_FIELD]
 
 
 def test_accepting_a_proposal_flows_to_reviewed_data_only():
@@ -1405,20 +1476,22 @@ def test_accepting_a_proposal_flows_to_reviewed_data_only():
 
     at.sidebar.radio[0].set_value("2. Data Review")
     at.run(timeout=60)
-    assert f"{_PROPOSAL_FIELD}  —  ✓ Accepted" in _page_text(at), "decision label not shown"
-    assert _kpis(at)["Approved Corrections"] == 1
+    assert _shows(at, f"**{_PROPOSAL_FIELD}**  ·  ✓ Accepted"), "decision label not shown"
+    # The Approved filter shows exactly the accepted field.
+    _set_filter(at, "Approved")
+    assert list(_review_table(at)) == [_PROPOSAL_FIELD]
 
 
-@pytest.mark.parametrize("prefix,decision", [("reject", "rejected"), ("keep", "kept_original")])
-def test_rejecting_or_keeping_a_proposal_changes_nothing(prefix, decision):
-    at = _data_review(_AiPatch(corrections=_swap_proposal_generator), f"proposal-{prefix}")
+def test_rejecting_a_proposal_changes_nothing():
+    at = _data_review(_AiPatch(corrections=_swap_proposal_generator), "proposal-reject")
     original = dict(at.session_state["extracted"][_PROPOSAL_FIELD])
 
-    _click_button(at, f"{prefix}_{_PROPOSAL_FIELD}")
+    _click_button(at, f"reject_{_PROPOSAL_FIELD}")
     assert not at.exception, "recording the decision raised an exception"
-    assert at.session_state["approved_corrections"][_PROPOSAL_FIELD]["decision"] == decision
+    assert at.session_state["approved_corrections"][_PROPOSAL_FIELD]["decision"] == "rejected"
     assert at.session_state["extracted"][_PROPOSAL_FIELD] == original, "raw extracted data was modified"
     assert at.session_state["reviewed_workbook_path"] is None, "a reviewed workbook was generated without an acceptance"
+    assert _shows(at, f"**{_PROPOSAL_FIELD}**  ·  ✕ Rejected"), "decision label not shown"
 
 
 # ---- AI_MAPPED fields never get a conflicting correction proposal ----
@@ -1571,8 +1644,9 @@ def _deterministic_partition_holds(k):
     return k["Successfully Extracted"] + k["Review Required"] + k["Not Found"] == k["Total Fields"]
 
 
-def _ai_cards_total(k):
-    return k["AI Confirmed"] + k["AI Flagged"] + k["AI Not Validated"] + k["AI Technical Errors"]
+def _ai_buckets_total(buckets):
+    # Every bucket, including inconclusive, so each AI record counts once.
+    return sum(buckets.values())
 
 
 def test_review_required_is_not_raised_by_ai_flags():
@@ -1586,8 +1660,9 @@ def test_review_required_is_not_raised_by_ai_flags():
     assert k["Review Required"] == 0, "AI flags must not raise the deterministic Review Required count"
     assert k["Successfully Extracted"] == _SYNTHETIC_OK and k["Not Found"] == _SYNTHETIC_NOT_FOUND
     assert _deterministic_partition_holds(k), "OK + Review Required + Not Found must equal Total Fields"
-    assert k["AI Flagged"] == 2 and k["AI Confirmed"] == 1, "AI buckets"
-    assert _ai_cards_total(k) == _SYNTHETIC_OK, "AI cards must cover each validated field exactly once"
+    buckets = _stored_ai_buckets(at)
+    assert buckets["flagged"] == 2 and buckets["confirmed"] == 1, "AI buckets"
+    assert _ai_buckets_total(buckets) == _SYNTHETIC_OK, "AI buckets must cover each validated field exactly once"
     flagged = [f for f, r in at.session_state["ai_validation_results"].items() if r.requires_review]
     assert len(flagged) == 2
     assert all(at.session_state["extracted"][f]["validation_status"] == "OK" for f in flagged), \
@@ -1614,9 +1689,16 @@ def test_review_required_counts_deterministic_review_fields():
     assert k["Successfully Extracted"] == statuses.count("OK")
     assert k["Not Found"] == statuses.count("NOT_FOUND")
     assert _deterministic_partition_holds(k), "OK + Review Required + Not Found must equal Total Fields"
-    assert k["AI Confirmed"] == 1 and k["AI Flagged"] == 1, "AI buckets"
+    buckets = _stored_ai_buckets(at)
+    assert buckets["confirmed"] == 1 and buckets["flagged"] == 1, "AI buckets"
     sendable = len(statuses) - statuses.count("NOT_FOUND")
-    assert _ai_cards_total(k) == sendable, "AI cards must cover each validated field exactly once"
+    assert _ai_buckets_total(buckets) == sendable, "AI buckets must cover each validated field exactly once"
+    # The Review Required filter shows exactly the deterministic review field,
+    # and the review section offers it for manual entry.
+    _set_filter(at, "Review Required")
+    assert list(_review_table(at)) == ["Cash"]
+    assert "manual_save_Cash" in {w.key for w in at.button}, "Enter Manually missing for a Review Required field"
+    assert not _shows(at, _NO_DECISIONS)
 
 
 # ---- Value-less correction proposals can never erase a value ---------
@@ -1732,8 +1814,9 @@ def test_data_review_offers_no_valueless_proposal():
     assert at.session_state["correction_proposals"][_NORMAL_FIELD].proposal_status == "PROPOSAL_REJECTED_BY_EVIDENCE"
     keys = {w.key for w in at.button}
     assert f"accept_{_NORMAL_FIELD}" not in keys, "a value-less proposal was offered for a decision"
-    assert _kpis(at)["Correction Proposals"] == 0
-    assert "No correction proposals require a decision for this document." in _page_text(at)
+    assert _shows(at, _NO_DECISIONS), "empty-state message missing"
+    _set_filter(at, "Correction Proposed")
+    assert list(_review_table(at)) == [], "a value-less proposal is listed as a correction proposal"
 
 
 def test_data_review_disables_accept_for_stale_valueless_proposal():
@@ -1754,13 +1837,157 @@ def test_data_review_disables_accept_for_stale_valueless_proposal():
     original = dict(at.session_state["extracted"][_NORMAL_FIELD])
     buttons = {w.key: w for w in at.button}
     assert buttons[f"accept_{_NORMAL_FIELD}"].disabled, "Accept must be disabled for a value-less proposal"
-    assert not buttons[f"reject_{_NORMAL_FIELD}"].disabled and not buttons[f"keep_{_NORMAL_FIELD}"].disabled
-    assert "Accept is unavailable" in _page_text(at)
+    assert not buttons[f"reject_{_NORMAL_FIELD}"].disabled
+    assert _shows(at, "Accept unavailable: this proposal has no valid value to apply."), "explanation missing"
 
-    _click_button(at, f"keep_{_NORMAL_FIELD}")
-    assert at.session_state["approved_corrections"][_NORMAL_FIELD]["decision"] == "kept_original"
+    _click_button(at, f"reject_{_NORMAL_FIELD}")
+    assert at.session_state["approved_corrections"][_NORMAL_FIELD]["decision"] == "rejected"
     assert at.session_state["extracted"][_NORMAL_FIELD] == original, "raw extracted data was modified"
     assert at.session_state["reviewed_workbook_path"] is None
+
+
+# ---- PDF page provenance ---------------------------------------------
+
+def _paged_synthetic_ocr_text():
+    """The synthetic balance sheet placed on PDF page 2: an invented cover
+    page ends with LLMWhisperer's '<<<' page separator (plus the form feed
+    it emits) before the statement starts."""
+    return "Invented Company Limited - Annual Report (cover page)\n<<<\f\n" + _synthetic_ocr_text() + "\n<<<\f\n"
+
+
+def test_line_page_numbers():
+    lines = ["cover", "<<<", "balance sheet", "total assets 2000 1800", "<<<", "cash flow", "<<<"]
+    assert ocr_upload.line_page_numbers(lines) == [1, 1, 2, 2, 2, 3, 3]
+    assert ocr_upload.line_page_numbers(["no", "separators", "here"]) is None, "no separators must mean no page data"
+
+
+def test_page_formatting():
+    import app
+
+    pages = [1, 1, 2, 2, 3]
+    assert app.pdf_page_for_line(3, pages) == 2
+    assert app.pdf_page_for_line(None, pages) is None
+    assert app.pdf_page_for_line(99, pages) is None
+    assert app.pdf_page_for_line(1, None) is None
+    assert app.format_pdf_pages(12, 12) == "12"
+    assert app.format_pdf_pages(12, 14) == "Current: 12 | Previous: 14"
+    assert app.format_pdf_pages(12, None) == "Current: 12 | Previous: Not available"
+    assert app.format_pdf_pages(None, None) == "Not available"
+    assert app.field_pdf_pages({"source_line_number": 4}, pages) == "3"
+    assert app.field_pdf_pages({"source_line_number": None}, pages) == "Not available"
+    assert app.field_pdf_pages({"source_line_number": 4}, None) == "Not available"
+
+
+def test_pdf_page_column_shows_actual_source_pages():
+    at = _data_review(
+        _AiPatch(corrections=_swap_proposal_generator), "pages", _paged_synthetic_ocr_text(),
+    )
+    rows = _review_table(at)
+    extracted = at.session_state["extracted"]
+    for field, row in rows.items():
+        if extracted[field].get("validation_status") == "NOT_FOUND":
+            assert row["page"] == "Not available", f"{field}: a field with no source line must show Not available"
+        else:
+            assert row["page"] == "2", f"{field}: expected the statement's real page"
+    assert sum(1 for r in rows.values() if r["page"] == "2") == _SYNTHETIC_OK
+    # The correction section shows the same page for the proposal.
+    assert _shows(at, "**PDF Page No.**  \n2"), "proposal page missing in the review section"
+    # Extracted values and statuses are unchanged by the new column.
+    assert all(r["status"] in ("OK", "Not Found") for r in rows.values())
+
+
+def test_pdf_page_column_without_page_metadata():
+    at = _data_review(_AiPatch(), "no-pages")   # no '<<<' separators in the text
+    assert at.session_state["source_line_pages"] is None
+    assert {r["page"] for r in _review_table(at).values()} == {"Not available"}
+
+
+def test_all_five_filters():
+    at = _data_review(_AiPatch(corrections=_swap_proposal_generator), "filters",
+                      _synthetic_ocr_text(ambiguous_cash=True))
+    extracted = at.session_state["extracted"]
+    assert len(_review_table(at)) == len(extracted), "Show All must list every field"
+    expected = {
+        "Review Required": [f for f, ed in extracted.items() if ed["validation_status"] == "REVIEW_REQUIRED"],
+        "Not Found": [f for f, ed in extracted.items() if ed["validation_status"] == "NOT_FOUND"],
+        "Correction Proposed": [_PROPOSAL_FIELD],
+        "Approved": [],
+    }
+    for value, fields in expected.items():
+        _set_filter(at, value)
+        assert sorted(_review_table(at)) == sorted(fields), f"{value} filter"
+    _set_filter(at, "Show All")
+    assert len(_review_table(at)) == len(extracted)
+
+
+# ---- Enter Manually (existing approved_corrections workflow) ----------
+
+def _enter_manually(at, field, current, previous):
+    at.text_input(key=f"manual_cur_{field}").set_value(current)
+    at.text_input(key=f"manual_prev_{field}").set_value(previous)
+    _click_button(at, f"manual_save_{field}")
+
+
+def test_manual_entry_flows_through_reviewed_data_only():
+    import reviewed_dataset
+
+    at = _data_review(_AiPatch(corrections=_swap_proposal_generator), "manual-ok")
+    original = dict(at.session_state["extracted"][_PROPOSAL_FIELD])
+    _enter_manually(at, _PROPOSAL_FIELD, "2,100.50", "1,900")
+    assert not at.exception, "saving manual values raised an exception"
+
+    record = at.session_state["approved_corrections"][_PROPOSAL_FIELD]
+    assert record["decision"] == "accepted" and record["source"] == "manual"
+    assert record["original_value_current"] == original["fy_current"], "original value not preserved"
+    assert at.session_state["extracted"][_PROPOSAL_FIELD] == original, "raw extracted data was modified"
+    assert at.session_state["reviewed_workbook_path"] is not None
+    reviewed = reviewed_dataset.build_reviewed_extracted(
+        at.session_state["extracted"], at.session_state["approved_corrections"],
+    )[_PROPOSAL_FIELD]
+    assert (reviewed["fy_current"], reviewed["fy_previous"]) == (2100.5, 1900.0)
+    assert reviewed["validation_status"] == "HUMAN_APPROVED_CORRECTION"
+    assert _shows(at, f"**{_PROPOSAL_FIELD}**  ·  ✓ Entered manually"), "manual decision label not shown"
+
+
+def test_manual_entry_cannot_erase_an_existing_value():
+    at = _data_review(_AiPatch(corrections=_swap_proposal_generator), "manual-erase")
+    original = dict(at.session_state["extracted"][_PROPOSAL_FIELD])
+    _enter_manually(at, _PROPOSAL_FIELD, "", "1,900")   # blank current year over an existing value
+    assert _PROPOSAL_FIELD not in (at.session_state["approved_corrections"] or {}), "an erasing manual entry was saved"
+    assert any("Manual values not saved" in str(e.value) for e in at.error), "no error explained the rejection"
+    assert at.session_state["extracted"][_PROPOSAL_FIELD] == original
+    assert at.session_state["reviewed_workbook_path"] is None
+
+
+# ---- Data Upload: Excel upload option (demonstration only) ------------
+
+def test_excel_upload_option_is_demonstration_only():
+    real_run_ocr = ocr_upload.run_ocr
+
+    def _must_not_run(*a, **k):
+        raise AssertionError("selecting an Excel file must not start PDF processing")
+
+    ocr_upload.run_ocr = _must_not_run
+    try:
+        with _AiPatch():
+            at = AppTest.from_file("app.py")
+            at.run(timeout=60)
+            uploaders = list(at.file_uploader)
+            assert uploaders[0].key.startswith("pdf_uploader_"), "the PDF uploader must remain the first upload option"
+            excel = next(u for u in uploaders if u.key == "excel_demo_uploader")
+            assert _shows(at, "Upload Excel File") and _shows(at, ".xlsx, .xls"), "Excel option label missing"
+            assert _shows(at, "Demonstration only"), "Excel option must say it is not functional"
+
+            excel.set_value(("borrower_financials.xlsx", b"PK\x03\x04 invented", "application/vnd.ms-excel"))
+            at.run(timeout=60)
+    finally:
+        ocr_upload.run_ocr = real_run_ocr
+
+    assert not at.exception, "selecting an Excel file raised an exception"
+    assert _shows(at, "Selected: borrower_financials.xlsx — not processed."), "selected filename not shown"
+    for key in ("pdf_name", "merged_workbook_path", "pdf_processing_error", "extracted"):
+        assert at.session_state[key] is None, f"Excel selection changed {key}"
+    assert at.session_state["source_mode"] == "none", "Excel selection activated a data source"
 
 
 def main():

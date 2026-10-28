@@ -185,7 +185,11 @@ def test_valid_response_renders_and_does_not_mutate_extracted_value():
         _ok(not at.exception, f"upload page runs with no exception: {[str(e) for e in at.exception]}")
 
         review_text = _page_text(at, "2. Data Review")
-        _ok("1 field mismatches" in review_text, "Data Review's AI validation caption reports exactly one FIELD_MISMATCH result")
+        # The AI statistics caption was removed from Data Review by request;
+        # the counts are still computed from the stored records.
+        _ok("field mismatches" not in review_text, "the removed AI statistics caption is no longer shown on Data Review")
+        _ok(ai_validation.summarize_validation_results(at.session_state["ai_validation_results"])["statuses"].get("FIELD_MISMATCH") == 1,
+            "exactly one FIELD_MISMATCH result is still recorded")
 
         # The Field-Level Review table itself no longer shows a per-field
         # AI Validation Status/Confidence column (removed by request -
@@ -237,7 +241,11 @@ def test_invalid_json_from_ollama_is_safely_rejected():
             "the rest of the upload pipeline (deterministic extraction) completed normally despite the AI failure")
 
         review_text = _page_text(at, "2. Data Review")
-        _ok("could not be validated (technical error)" in review_text, "a technical-error count is shown on Data Review")
+        # The technical-error count is no longer shown on Data Review (AI
+        # statistics removed by request); it is still recorded per field.
+        _ok("could not be validated (technical error)" not in review_text, "the removed AI statistics caption is no longer shown")
+        _ok(all(r.technical_status == "AI_ERROR" for r in at.session_state["ai_validation_results"].values()),
+            "every field is still recorded as a technical error")
         _ok("INSUFFICIENT_CONTEXT" not in review_text, "malformed response is never reported as INSUFFICIENT_CONTEXT (that is a content judgement, not a technical failure)")
     finally:
         ocr_upload.run_ocr = real_run_ocr
