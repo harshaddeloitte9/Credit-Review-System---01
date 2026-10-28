@@ -316,6 +316,77 @@ class FieldPresenceResult:
     candidate_line_numbers: tuple = ()
 
 
+# ============================================================
+# DASHBOARD BUCKETS - one, mutually exclusive bucket per main-validator
+# result, so "AI Confirmed", "AI Flagged" etc. always add up to the
+# number of fields sent to the validator and never overlap. Advisory
+# only: none of this ever changes a field's deterministic status.
+# ============================================================
+
+# Content judgements that mean "the extracted value may be wrong".
+CONCERN_STATUSES = frozenset({
+    "YEAR_MISMATCH", "FIELD_MISMATCH", "VALUE_SUSPICIOUS", "NOT_FOUND_IN_SOURCE",
+})
+
+BUCKET_CONFIRMED = "confirmed"        # AI_COMPLETED + CONFIRMED, no review requested
+BUCKET_FLAGGED = "flagged"            # AI_COMPLETED + a concern status, OR any completed result with requires_review=True
+BUCKET_INCONCLUSIVE = "inconclusive"  # AI_COMPLETED + INSUFFICIENT_CONTEXT, no review requested
+BUCKET_SKIPPED = "skipped"            # AI_SKIPPED (e.g. time budget exhausted) - never sent to the AI
+BUCKET_UNAVAILABLE = "unavailable"    # AI_UNAVAILABLE - provider not available, no attempt made
+BUCKET_ERROR = "error"                # AI_ERROR - attempted, but the call/response failed
+
+VALIDATION_BUCKETS = (
+    BUCKET_CONFIRMED, BUCKET_FLAGGED, BUCKET_INCONCLUSIVE,
+    BUCKET_SKIPPED, BUCKET_UNAVAILABLE, BUCKET_ERROR,
+)
+
+
+def classify_validation_result(result):
+    """Exactly one VALIDATION_BUCKETS member for an AIValidationResult.
+    A CONFIRMED result whose evidence could not be verified (or where the
+    AI itself asked for review) is FLAGGED, not confirmed - a confirmation
+    nobody can check is not counted as one."""
+    technical = result.technical_status
+    if technical == AI_SKIPPED:
+        return BUCKET_SKIPPED
+    if technical == AI_UNAVAILABLE:
+        return BUCKET_UNAVAILABLE
+    if technical != AI_COMPLETED:
+        return BUCKET_ERROR
+    if result.requires_review is True or result.validation_status in CONCERN_STATUSES:
+        return BUCKET_FLAGGED
+    if result.validation_status == "CONFIRMED":
+        return BUCKET_CONFIRMED
+    return BUCKET_INCONCLUSIVE
+
+
+def summarize_validation_results(results):
+    """Counts built straight from the per-field records (never from a
+    separately-maintained counter). Returns:
+      {"total": n, "buckets": {bucket: count}, "statuses": {validation_status: count},
+       "by_field": {field: bucket}}"""
+    buckets = {b: 0 for b in VALIDATION_BUCKETS}
+    statuses = {}
+    by_field = {}
+    for field, result in results.items():
+        bucket = classify_validation_result(result)
+        buckets[bucket] += 1
+        by_field[field] = bucket
+        if result.technical_status == AI_COMPLETED and result.validation_status is not None:
+            statuses[result.validation_status] = statuses.get(result.validation_status, 0) + 1
+    return {"total": len(results), "buckets": buckets, "statuses": statuses, "by_field": by_field}
+
+
+def provider_display_name():
+    """The user-facing name of the provider check_ollama_availability()/
+    call_ollama() actually dispatch to: exactly "openai" selects OpenAI;
+    every other string value runs the Ollama code path. A neutral label
+    is returned only if the setting itself cannot be read."""
+    if not isinstance(AI_PROVIDER, str):
+        return "AI provider"
+    return "OpenAI" if AI_PROVIDER == "openai" else "Ollama"
+
+
 @dataclass(frozen=True)
 class OllamaAvailability:
     reachable: bool
@@ -1148,7 +1219,7 @@ def validate_extracted_fields(extracted, lines, meta=None, model=DEFAULT_MODEL,
                 results[f] = AIValidationResult(
                     field=f, technical_status=AI_ERROR,
                     validation_status=None, confidence=None,
-                    explanation=f"Ollama call failed: {exc}", requires_review=None,
+                    explanation=f"{provider_display_name()} call failed: {exc}", requires_review=None,
                     fy_current=ed.get("fy_current"), fy_previous=ed.get("fy_previous"),
                     year_current_label=(meta or {}).get("target_current_label"),
                     year_previous_label=(meta or {}).get("target_previous_label"),
@@ -1173,7 +1244,7 @@ def validate_extracted_fields(extracted, lines, meta=None, model=DEFAULT_MODEL,
                 results[f] = AIValidationResult(
                     field=f, technical_status=AI_ERROR,
                     validation_status=None, confidence=None,
-                    explanation="Ollama's response did not include a valid, schema-conforming result for this field.",
+                    explanation=f"{provider_display_name()}'s response did not include a valid, schema-conforming result for this field.",
                     requires_review=None, **common_kwargs,
                 )
                 continue
@@ -1227,7 +1298,7 @@ def validate_extracted_fields(extracted, lines, meta=None, model=DEFAULT_MODEL,
                 presence_results[f] = FieldPresenceResult(
                     field=f, technical_status=AI_ERROR,
                     presence_status=None, confidence=None,
-                    explanation=f"Ollama call failed: {exc}",
+                    explanation=f"{provider_display_name()} call failed: {exc}",
                 )
             continue
 
@@ -1238,7 +1309,7 @@ def validate_extracted_fields(extracted, lines, meta=None, model=DEFAULT_MODEL,
                 presence_results[f] = FieldPresenceResult(
                     field=f, technical_status=AI_ERROR,
                     presence_status=None, confidence=None,
-                    explanation="Ollama's response did not include a valid, schema-conforming presence result for this field.",
+                    explanation=f"{provider_display_name()}'s response did not include a valid, schema-conforming presence result for this field.",
                 )
                 continue
 

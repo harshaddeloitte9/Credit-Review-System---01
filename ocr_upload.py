@@ -244,6 +244,64 @@ def _notify(status_callback, stage, state, detail=None):
         status_callback(stage, state, detail)
 
 
+def _result_reason(result):
+    return getattr(result, "reason", None) or getattr(result, "explanation", None) or ""
+
+
+def ai_stage_outcome(results, availability, not_needed_detail, unexpected_error=None, report_partial=False):
+    """(state, detail) for an advisory AI stage, decided from what actually
+    happened - never from the provider setting alone:
+      "not_needed"     - nothing needed an AI attempt; the provider was never checked
+      "unavailable"    - the provider was checked and is not available
+      "exception"      - the stage itself raised unexpectedly
+      "attempt_failed" - AI calls were made, but none produced a usable result
+      "partial"        - (report_partial only) some fields got a usable AI
+                         result, others hit an error or were skipped
+      "skipped"        - no AI call was made (time budget, or nothing to send)
+      "complete"       - at least one field got a usable result from a real AI call
+
+    Only a result produced by an actual AI call counts as success. A
+    result marked ai_call_made=False (e.g. dynamic mapping's
+    INSUFFICIENT_CONTEXT when a field has no candidate rows) never does."""
+    if unexpected_error is not None:
+        return "exception", unexpected_error
+    if availability is None or not results:
+        return "not_needed", not_needed_detail
+    if not availability.reachable or not availability.model_installed:
+        return "unavailable", availability.detail
+    values = list(results.values())
+    total = len(values)
+    succeeded = [
+        r for r in values
+        if r.technical_status == ai_validation.AI_COMPLETED and getattr(r, "ai_call_made", True)
+    ]
+    no_call = [
+        r for r in values
+        if r.technical_status == ai_validation.AI_COMPLETED and not getattr(r, "ai_call_made", True)
+    ]
+    errors = [r for r in values if r.technical_status == ai_validation.AI_ERROR]
+    skipped = [r for r in values if r.technical_status == ai_validation.AI_SKIPPED]
+
+    notes = []
+    if errors:
+        notes.append(f"{len(errors)} of {total} field(s) hit a technical error")
+    if skipped:
+        notes.append(f"{len(skipped)} of {total} field(s) skipped (time budget exhausted)")
+    if no_call:
+        notes.append(f"{len(no_call)} of {total} field(s) had no candidate rows to send (no AI call made)")
+
+    if succeeded:
+        state = "partial" if report_partial and (errors or skipped) else "complete"
+        return state, "; ".join(notes) or None
+    if errors:
+        return "attempt_failed", "; ".join([_result_reason(errors[0])] + notes)
+    if skipped:
+        return "skipped", "; ".join([_result_reason(skipped[0])] + notes[1:])
+    if no_call:
+        return "skipped", "; ".join(notes)
+    return "attempt_failed", "No field received a usable AI result."
+
+
 def process_uploaded_pdf(pdf_path, original_filename, status_callback=None):
     """End-to-end: PDF -> OCR -> extraction -> fresh workbook (from the
     unmodified template) -> merged with the policy workbook. Returns a
@@ -253,7 +311,10 @@ def process_uploaded_pdf(pdf_path, original_filename, status_callback=None):
 
     status_callback(stage, state, detail=None), if given, is called at
     each real step boundary below (stage in "ocr"/"extraction"/
-    "population"; state in "processing"/"complete"/"reused"/"failed") so
+    "population"; state in "processing"/"complete"/"reused"/"failed"; the
+    advisory AI stages may also report "not_needed"/"unavailable"/
+    "exception"/"attempt_failed"/"partial"/"skipped" - see
+    ai_stage_outcome()) so
     a caller (the Data Upload UI) can show genuine per-stage progress
     rather than a simulated one. Optional and side-effect-free when
     omitted - no behavior here depends on it.
@@ -344,15 +405,17 @@ def process_uploaded_pdf(pdf_path, original_filename, status_callback=None):
     # passes through this call byte-for-byte unchanged.
     # ------------------------------------------------------------
     _notify(status_callback, "ai_mapping", "processing")
+    ai_mapping_error = None
     try:
         extracted, ai_mapping_results, ai_mapping_availability = ai_dynamic_mapping.map_missing_fields(
             extracted, lines_for_ai, meta, layout_lines=layout_lines_for_ai
         )
     except Exception as exc:
         ai_mapping_results = {}
+        ai_mapping_error = f"AI dynamic mapping failed unexpectedly: {exc}"
         ai_mapping_availability = ai_validation.OllamaAvailability(
             reachable=False, model_installed=False, installed_models=[],
-            detail=f"AI dynamic mapping failed unexpectedly: {exc}",
+            detail=ai_mapping_error,
         )
 
     ai_mapping_technical_counts = {}
@@ -367,10 +430,12 @@ def process_uploaded_pdf(pdf_path, original_filename, status_callback=None):
         and ai_mapping_availability is not None
         and ai_mapping_availability.reachable and ai_mapping_availability.model_installed
     )
-    _notify(
-        status_callback, "ai_mapping", "complete" if ai_mapping_available else "skipped",
-        ai_mapping_availability.detail if ai_mapping_availability is not None else "No fields required a mapping attempt.",
+    ai_mapping_stage_state, ai_mapping_stage_detail = ai_stage_outcome(
+        ai_mapping_results, ai_mapping_availability,
+        "No fields required a mapping attempt.", unexpected_error=ai_mapping_error,
+        report_partial=True,
     )
+    _notify(status_callback, "ai_mapping", ai_mapping_stage_state, ai_mapping_stage_detail)
 
     _notify(status_callback, "population", "processing")
     try:
@@ -425,6 +490,7 @@ def process_uploaded_pdf(pdf_path, original_filename, status_callback=None):
     # not rebuilt.
     # ------------------------------------------------------------
     _notify(status_callback, "ai_validation", "processing")
+    ai_validation_error = None
     try:
         ai_results, ai_presence_results, ai_availability = ai_validation.validate_extracted_fields(
             extracted, lines_for_ai, meta, layout_lines=layout_lines_for_ai
@@ -432,9 +498,10 @@ def process_uploaded_pdf(pdf_path, original_filename, status_callback=None):
     except Exception as exc:
         ai_results = {}
         ai_presence_results = {}
+        ai_validation_error = f"AI validation failed unexpectedly: {exc}"
         ai_availability = ai_validation.OllamaAvailability(
             reachable=False, model_installed=False, installed_models=[],
-            detail=f"AI validation failed unexpectedly: {exc}",
+            detail=ai_validation_error,
         )
 
     ai_technical_counts = {}
@@ -454,7 +521,10 @@ def process_uploaded_pdf(pdf_path, original_filename, status_callback=None):
         bool(ai_results or ai_presence_results)
         and ai_availability.reachable and ai_availability.model_installed
     )
-    _notify(status_callback, "ai_validation", "complete" if ai_validation_available else "skipped", ai_availability.detail)
+    _notify(status_callback, "ai_validation", *ai_stage_outcome(
+        {**ai_presence_results, **ai_results}, ai_availability,
+        "No fields required AI validation.", unexpected_error=ai_validation_error,
+    ))
 
     # ------------------------------------------------------------
     # AI-ASSISTED MAPPING CORRECTION PROPOSALS (Phase 3A) - advisory
@@ -465,15 +535,17 @@ def process_uploaded_pdf(pdf_path, original_filename, status_callback=None):
     # never break the primary upload the analyst is waiting on.
     # ------------------------------------------------------------
     _notify(status_callback, "ai_correction", "processing")
+    correction_error = None
     try:
         correction_proposals, correction_availability = ai_correction_proposals.generate_correction_proposals(
             extracted, ai_results, lines_for_ai, meta, layout_lines=layout_lines_for_ai
         )
     except Exception as exc:
         correction_proposals = {}
+        correction_error = f"AI correction-proposal generation failed unexpectedly: {exc}"
         correction_availability = ai_validation.OllamaAvailability(
             reachable=False, model_installed=False, installed_models=[],
-            detail=f"AI correction-proposal generation failed unexpectedly: {exc}",
+            detail=correction_error,
         )
 
     correction_technical_counts = {}
@@ -494,7 +566,10 @@ def process_uploaded_pdf(pdf_path, original_filename, status_callback=None):
             bool(correction_proposals)
             and correction_availability.reachable and correction_availability.model_installed
         )
-    _notify(status_callback, "ai_correction", "complete" if correction_available else "skipped", correction_detail)
+    _notify(status_callback, "ai_correction", *ai_stage_outcome(
+        correction_proposals, correction_availability,
+        "No fields required a correction-proposal attempt.", unexpected_error=correction_error,
+    ))
 
     return {
         "pdf_name": original_filename,
@@ -524,6 +599,8 @@ def process_uploaded_pdf(pdf_path, original_filename, status_callback=None):
         "ai_mapping_results": ai_mapping_results,
         "ai_mapping_available": ai_mapping_available,
         "ai_mapping_detail": ai_mapping_availability.detail if ai_mapping_availability is not None else "No fields required a mapping attempt.",
+        "ai_mapping_stage_state": ai_mapping_stage_state,
+        "ai_mapping_stage_detail": ai_mapping_stage_detail,
         "ai_mapping_technical_counts": ai_mapping_technical_counts,
         "ai_mapping_status_counts": ai_mapping_status_counts,
     }

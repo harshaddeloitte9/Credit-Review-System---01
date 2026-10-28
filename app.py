@@ -136,6 +136,8 @@ PDF_SESSION_KEYS = [
     ("ai_mapping_results", None),
     ("ai_mapping_available", False),
     ("ai_mapping_detail", None),
+    ("ai_mapping_stage_state", None),
+    ("ai_mapping_stage_detail", None),
     ("ai_mapping_technical_counts", None),
     ("ai_mapping_status_counts", None),
     # Canonical reviewed dataset (final integration pass) - see
@@ -797,40 +799,51 @@ _UPLOAD_STAGE_DISPLAY = {
     "reused": ("✓ Previously Extracted", "good"),
     "processing": ("⟳ Processing", "processing"),
     "failed": ("✕ Failed", "critical"),
-    # AI validation only - the configured AI provider was not available
-    # for this run. Never a failure: the deterministic pipeline above is
-    # unaffected either way (see ai_validation.py).
-    "skipped": ("○ Skipped (AI provider unavailable)", "neutral"),
+    # Advisory AI stages only (see ocr_upload.ai_stage_outcome). None of
+    # these is a pipeline failure: the deterministic results are unaffected.
+    "not_needed": ("○ Not needed", "neutral"),
+    "unavailable": ("○ Skipped (AI provider unavailable)", "neutral"),
+    "attempt_failed": ("✕ Attempted, but failed", "warning"),
+    "partial": ("◐ Partially complete", "warning"),
+    "exception": ("✕ Failed (unexpected error)", "warning"),
+    "skipped": ("○ Skipped", "neutral"),
 }
+
+_AI_PROVIDER_LABELS = {"openai": "OpenAI", "ollama": "Ollama"}
 
 
 def _ai_provider_label(provider_name=None, detail=None):
-    if provider_name is None and detail:
-        detail_lower = detail.lower()
-        if "openai" in detail_lower:
-            provider_name = "openai"
-        elif "ollama" in detail_lower:
-            provider_name = "ollama"
-    provider = (provider_name or getattr(ai_validation, "AI_PROVIDER", "ollama") or "ollama").strip().lower()
-    return "OpenAI" if provider == "openai" else "Ollama"
+    """An explicit provider_name if given, otherwise the provider the AI
+    layer actually dispatches on (ai_validation.provider_display_name).
+    `detail` is accepted for backward compatibility only - error text is
+    never used to guess the provider. An unrecognised explicit name gets
+    a neutral label."""
+    if provider_name is None:
+        return ai_validation.provider_display_name()
+    return _AI_PROVIDER_LABELS.get(str(provider_name).strip().lower(), "AI provider")
 
 
 def _ai_unavailable_fallback(provider_name=None):
     return f"{_ai_provider_label(provider_name)} is unavailable."
 
 
+def _upload_stage_subtitle(raw_state, detail=None):
+    """(subtitle, kind) for one pipeline stage. Only the "unavailable"
+    state - the provider was actually checked and found unavailable -
+    ever names a provider as unavailable."""
+    subtitle, kind = _UPLOAD_STAGE_DISPLAY.get(raw_state, ("○ Waiting", "neutral"))
+    if raw_state == "unavailable":
+        subtitle = f"○ Skipped ({_ai_provider_label(detail=detail)} unavailable)"
+    if detail and raw_state in ("not_needed", "unavailable", "exception", "attempt_failed", "partial", "skipped", "complete"):
+        subtitle = f"{subtitle}: {html.escape(str(detail))}"
+    return subtitle, kind
+
+
 def _render_upload_pipeline(placeholder, stage_states, stage_details=None):
     stage_details = stage_details or {}
     steps = []
     for key, title in UPLOAD_STAGES:
-        raw_state = stage_states.get(key)
-        detail = stage_details.get(key)
-        subtitle, kind = _UPLOAD_STAGE_DISPLAY.get(raw_state, ("○ Waiting", "neutral"))
-        if raw_state == "skipped":
-            provider = _ai_provider_label(detail=detail)
-            subtitle = f"○ Skipped ({provider} unavailable)"
-            if detail:
-                subtitle = f"○ Skipped ({provider} unavailable): {detail}"
+        subtitle, kind = _upload_stage_subtitle(stage_states.get(key), stage_details.get(key))
         steps.append((title, subtitle, kind))
     with placeholder.container():
         render_flow_steps(steps)
@@ -967,8 +980,13 @@ if selected_area == AREAS[0]:
     if _uploaded_pdf is not None:
         _pdf_upload_id = getattr(_uploaded_pdf, "file_id", None) or f"{_uploaded_pdf.name}:{_uploaded_pdf.size}"
         if _pdf_upload_id != st.session_state["_last_pdf_upload_id"]:
-            st.session_state["_last_pdf_upload_id"] = _pdf_upload_id
             _cleanup_pdf_artifacts()
+            # Clear every per-upload key (AI results included) BEFORE
+            # processing, so a failed new upload can never leave the
+            # previous document's results on screen.
+            for _key, _default in PDF_SESSION_KEYS:
+                st.session_state[_key] = dict(_default) if isinstance(_default, dict) else _default
+            st.session_state["_last_pdf_upload_id"] = _pdf_upload_id
             st.session_state["pdf_processing_error"] = None
             st.session_state["pdf_processing_failed_stage"] = None
             _reset_fb_nfb_session_state()
@@ -1026,6 +1044,8 @@ if selected_area == AREAS[0]:
                     st.session_state["ai_mapping_results"] = _result["ai_mapping_results"]
                     st.session_state["ai_mapping_available"] = _result["ai_mapping_available"]
                     st.session_state["ai_mapping_detail"] = _result["ai_mapping_detail"]
+                    st.session_state["ai_mapping_stage_state"] = _result["ai_mapping_stage_state"]
+                    st.session_state["ai_mapping_stage_detail"] = _result["ai_mapping_stage_detail"]
                     st.session_state["ai_mapping_technical_counts"] = _result["ai_mapping_technical_counts"]
                     st.session_state["ai_mapping_status_counts"] = _result["ai_mapping_status_counts"]
                     st.session_state["extracted"] = _result["extracted"]
@@ -1315,14 +1335,15 @@ elif selected_area == AREAS[1]:
             _status = display_field_status(_ed.get("validation_status"), _dr_approved.get(_field))
             _dr_status_counts[_status] = _dr_status_counts.get(_status, 0) + 1
 
-        _dr_ai_confirmed = sum(
-            1 for r in _dr_ai_results.values()
-            if r.technical_status == "AI_COMPLETED" and r.validation_status == "CONFIRMED"
-        )
-        _dr_ai_flagged = sum(
-            1 for r in _dr_ai_results.values()
-            if r.technical_status == "AI_ERROR" or r.requires_review is True
-        )
+        # One mutually exclusive bucket per AI validation record (see
+        # ai_validation.classify_validation_result). Advisory only - the
+        # deterministic statuses counted above are never changed by it.
+        _dr_ai_summary = ai_validation.summarize_validation_results(_dr_ai_results)
+        _dr_ai_buckets = _dr_ai_summary["buckets"]
+        _dr_ai_confirmed = _dr_ai_buckets["confirmed"]
+        _dr_ai_flagged = _dr_ai_buckets["flagged"]
+        _dr_ai_not_validated = _dr_ai_buckets["skipped"] + _dr_ai_buckets["unavailable"]
+        _dr_ai_errors = _dr_ai_buckets["error"]
         _dr_ai_presence_matches = sum(1 for r in _dr_presence_results.values() if r.presence_status == "FOUND_POSSIBLE_MATCH")
         _dr_correction_count = sum(1 for p in _dr_proposals.values() if p.proposal_status in ("PROPOSAL_AVAILABLE", "PROPOSAL_UNVERIFIED"))
         _dr_approved_count = sum(1 for dec in _dr_approved.values() if dec.get("decision") == "accepted")
@@ -1340,6 +1361,8 @@ elif selected_area == AREAS[1]:
             kpi_card_html("Not Found", str(_dr_not_found_count)),
             kpi_card_html("AI Confirmed", str(_dr_ai_confirmed)),
             kpi_card_html("AI Flagged", str(_dr_ai_flagged), icon_kind="warning" if _dr_ai_flagged else "good"),
+            kpi_card_html("AI Not Validated", str(_dr_ai_not_validated)),
+            kpi_card_html("AI Technical Errors", str(_dr_ai_errors), icon_kind="warning" if _dr_ai_errors else "good"),
             kpi_card_html("AI Presence Matches", str(_dr_ai_presence_matches)),
             kpi_card_html(
                 "Correction Proposals", str(_dr_correction_count),
@@ -1364,17 +1387,25 @@ elif selected_area == AREAS[1]:
                 "The deterministic statuses below are unaffected."
             )
         else:
-            _dr_ai_technical_counts = st.session_state.get("ai_technical_counts") or {}
-            _dr_ai_validation_counts = st.session_state.get("ai_validation_counts") or {}
+            # Counted from the records themselves (the stored
+            # ai_technical_counts also includes NOT_FOUND presence checks).
+            _dr_ai_statuses = _dr_ai_summary["statuses"]
+            _dr_ai_validated = _dr_ai_confirmed + _dr_ai_flagged + _dr_ai_buckets["inconclusive"]
             st.caption(
-                f"Of {len(_dr_ai_results)} fields with a deterministic value: "
-                f"{_dr_ai_technical_counts.get('AI_COMPLETED', 0)} validated, "
-                f"{_dr_ai_technical_counts.get('AI_SKIPPED', 0)} skipped (time budget exhausted), "
-                f"{_dr_ai_technical_counts.get('AI_ERROR', 0)} could not be validated (technical error). "
-                f"Of those validated: {_dr_ai_validation_counts.get('CONFIRMED', 0)} confirmed, "
-                f"{_dr_ai_validation_counts.get('YEAR_MISMATCH', 0)} year mismatches, "
-                f"{_dr_ai_validation_counts.get('FIELD_MISMATCH', 0)} field mismatches, "
-                f"{_dr_ai_validation_counts.get('VALUE_SUSPICIOUS', 0)} suspicious values."
+                f"Of {_dr_ai_summary['total']} fields with a deterministic value: "
+                f"{_dr_ai_validated} validated by AI "
+                f"({_dr_ai_confirmed} confirmed, {_dr_ai_flagged} flagged, "
+                f"{_dr_ai_buckets['inconclusive']} inconclusive), "
+                f"{_dr_ai_not_validated} not validated (skipped — time budget exhausted or provider unavailable), "
+                f"{_dr_ai_errors} could not be validated (technical error). "
+                f"AI results: {_dr_ai_statuses.get('CONFIRMED', 0)} confirmed, "
+                f"{_dr_ai_statuses.get('YEAR_MISMATCH', 0)} year mismatches, "
+                f"{_dr_ai_statuses.get('FIELD_MISMATCH', 0)} field mismatches, "
+                f"{_dr_ai_statuses.get('VALUE_SUSPICIOUS', 0)} suspicious values, "
+                f"{_dr_ai_statuses.get('NOT_FOUND_IN_SOURCE', 0)} not found in source, "
+                f"{_dr_ai_statuses.get('INSUFFICIENT_CONTEXT', 0)} insufficient context. "
+                "A confirmation the AI marked for review, or whose evidence could not be verified, "
+                "counts as flagged, not confirmed. AI results never change the Deterministic Status."
             )
 
         _dr_filter = st.radio(
@@ -1426,6 +1457,114 @@ elif selected_area == AREAS[1]:
         else:
             st.caption("No fields match this filter.")
 
+        # Which fields the AI actually returned a result (or an error)
+        # for - kept out of the primary table so the deterministic status
+        # stays visibly separate. Skipped fields are counted above.
+        _dr_ai_bucket_labels = {
+            "confirmed": "AI Confirmed", "flagged": "AI Flagged",
+            "inconclusive": "AI Inconclusive", "error": "AI Technical Error",
+        }
+        _dr_ai_rows = [
+            {
+                "Field": _field,
+                "Extraction Status": display_field_status(
+                    (_dr_extracted.get(_field) or {}).get("validation_status"), _dr_approved.get(_field)
+                ),
+                "AI Assessment": _dr_ai_bucket_labels[_bucket],
+                "AI Result": _dr_ai_results[_field].validation_status or _dr_ai_results[_field].technical_status,
+                "AI Requested Review": "Yes" if _dr_ai_results[_field].requires_review is True else "No",
+            }
+            for _field, _bucket in _dr_ai_summary["by_field"].items()
+            if _bucket in _dr_ai_bucket_labels
+        ]
+        if _dr_ai_rows:
+            with st.expander(f"AI validation by field ({len(_dr_ai_rows)} field(s) with an AI result)", expanded=False):
+                render_html_table(
+                    _dr_ai_rows,
+                    columns=["Field", "Extraction Status", "AI Assessment", "AI Result", "AI Requested Review"],
+                )
+
+        # ---- Accept / Reject / Keep Original ---------------------------
+        # Restored from 8d83f86 (removed in 7f40f7c). Correction proposals
+        # cover deterministically extracted fields that look suspect - this
+        # is the only place they can be decided. They never cover NOT_FOUND
+        # or AI_MAPPED fields (ai_correction_proposals._fields_requiring_
+        # correction excludes both), so a field never has both these
+        # controls and the dynamic-mapping controls below; both workflows
+        # record into approved_corrections[field]. A decision never
+        # modifies raw `extracted` (see reviewed_dataset.py).
+        render_section(
+            "Correction Proposals Awaiting Decision",
+            "Only proposals the deterministic re-verification could actually confirm are shown "
+            "here for a decision - a rejected/hallucinated proposal is never offered.",
+        )
+        _dr_reviewable = {
+            f: p for f, p in _dr_proposals.items()
+            if p.proposal_status in ("PROPOSAL_AVAILABLE", "PROPOSAL_UNVERIFIED")
+        }
+        if not _dr_reviewable:
+            st.caption("No correction proposals require a decision for this document.")
+        for _field, _p in _dr_reviewable.items():
+            _dec = _dr_approved.get(_field)
+            _dec_label = {"accepted": "✓ Accepted", "rejected": "✕ Rejected", "kept_original": "○ Kept Original"}.get(
+                _dec.get("decision") if _dec else None
+            )
+            with st.expander(_field + (f"  —  {_dec_label}" if _dec_label else ""), expanded=_dec is None):
+                st.markdown(badge_html("ADVISORY — REQUIRES REVIEW", "warning"), unsafe_allow_html=True)
+                st.caption(f"Current mapping status: {_p.trigger_reason}")
+                col_orig, col_proposed = st.columns(2)
+                with col_orig:
+                    st.markdown("**Current extracted mapping**")
+                    st.markdown(f"FY current → {fmt_money(_p.original_value_current)}")
+                    st.markdown(f"FY previous → {fmt_money(_p.original_value_previous)}")
+                    st.caption(f"Source: line {_p.original_source_line_number}")
+                with col_proposed:
+                    st.markdown("**AI-suggested mapping**")
+                    st.markdown(f"{_p.proposed_column_current_label or '—'} → {fmt_proposed_value(_p.proposed_value_current)}")
+                    st.markdown(f"{_p.proposed_column_previous_label or '—'} → {fmt_proposed_value(_p.proposed_value_previous)}")
+                    st.caption(f"Suggested source: line {_p.proposed_source_line_number}")
+                st.caption(f"AI confidence: {_p.confidence:.0%}" if _p.confidence is not None else "AI confidence: —")
+                st.caption(f"Reason: {_p.reason}")
+                with st.expander("Evidence & verification detail", expanded=False):
+                    st.markdown("**Current mapping's source text**")
+                    st.code(_p.original_source_text or "—")
+                    st.markdown("**AI-suggested mapping's source text**")
+                    st.code(_p.proposed_source_text or "—")
+                    _dr_checklist = "✓ Source line verified · ✓ Value found in OCR source · ✓ Fiscal-year column verified"
+                    if _p.proposal_status == "PROPOSAL_UNVERIFIED":
+                        _dr_checklist += " · ✗ Supporting evidence citations could not be verified"
+                    st.caption(f"Evidence verification: {_dr_checklist}")
+
+                def _record_decision(field=_field, proposal=_p, decision=None):
+                    corrections = dict(st.session_state.get("approved_corrections") or {})
+                    corrections[field] = {
+                        "decision": decision,
+                        "proposed_value_current": proposal.proposed_value_current,
+                        "proposed_value_previous": proposal.proposed_value_previous,
+                        "proposed_source_line_number": proposal.proposed_source_line_number,
+                        "proposed_source_text": proposal.proposed_source_text,
+                        "original_value_current": proposal.original_value_current,
+                        "original_value_previous": proposal.original_value_previous,
+                        "original_source_line_number": proposal.original_source_line_number,
+                        "reason": proposal.reason,
+                        "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    }
+                    st.session_state["approved_corrections"] = corrections
+
+                _btn_cols = st.columns(3)
+                with _btn_cols[0]:
+                    if st.button("✓ Accept Proposal", key=f"accept_{_field}", width="stretch"):
+                        _record_decision(decision="accepted")
+                        st.rerun()
+                with _btn_cols[1]:
+                    if st.button("✕ Reject Proposal", key=f"reject_{_field}", width="stretch"):
+                        _record_decision(decision="rejected")
+                        st.rerun()
+                with _btn_cols[2]:
+                    if st.button("○ Keep Original", key=f"keep_{_field}", width="stretch"):
+                        _record_decision(decision="kept_original")
+                        st.rerun()
+
         # ---- AI Dynamic Field Mapping -----------------------------------
         render_section(
             "AI Dynamic Field Mapping",
@@ -1460,7 +1599,17 @@ elif selected_area == AREAS[1]:
         _dr_mapping_results = st.session_state.get("ai_mapping_results") or {}
         _dr_mapping_technical_counts = st.session_state.get("ai_mapping_technical_counts") or {}
         _dr_mapping_status_counts = st.session_state.get("ai_mapping_status_counts") or {}
-        if not _dr_mapping_results:
+        # The upload's own mapping-stage outcome (ocr_upload.ai_stage_outcome)
+        # decides the message - empty results alone do not mean "not needed"
+        # (a crashed mapping run also leaves them empty).
+        _dr_mapping_stage = st.session_state.get("ai_mapping_stage_state")
+        _dr_mapping_stage_detail = st.session_state.get("ai_mapping_stage_detail") or ""
+        if _dr_mapping_stage == "exception":
+            st.warning(
+                f"AI dynamic mapping failed for this upload — {_dr_mapping_stage_detail} "
+                "No mapping was applied; fields remain exactly as the deterministic pipeline left them."
+            )
+        elif not _dr_mapping_results:
             st.caption("No fields required a dynamic-mapping attempt (nothing was deterministically NOT_FOUND).")
         elif not st.session_state.get("ai_mapping_available"):
             st.caption(
@@ -1469,6 +1618,12 @@ elif selected_area == AREAS[1]:
                 "These fields remain NOT_FOUND, exactly as the deterministic pipeline left them."
             )
         else:
+            if _dr_mapping_stage == "attempt_failed":
+                st.warning(f"AI dynamic mapping was attempted but no AI call succeeded — {_dr_mapping_stage_detail}")
+            elif _dr_mapping_stage == "partial":
+                st.caption(f"AI dynamic mapping partially completed — {_dr_mapping_stage_detail}.")
+            elif _dr_mapping_stage == "skipped":
+                st.caption(f"No AI mapping call was made — {_dr_mapping_stage_detail}")
             # Classify EVERY field exactly once, through the single
             # shared function - the summary counts below and the
             # table's Review Status badges are both built from this
@@ -3078,15 +3233,13 @@ elif selected_area == AREAS[8]:
         st.caption("Not applicable - this workbook was uploaded directly and is trusted as-is; there is no OCR extraction/AI validation layer to summarize.")
     else:
         _cm9_ai_results = st.session_state.get("ai_validation_results") or {}
-        _cm9_technical_counts = st.session_state.get("ai_technical_counts") or {}
-        _cm9_validation_counts = st.session_state.get("ai_validation_counts") or {}
         _cm9_correction_counts = st.session_state.get("correction_proposal_counts") or {}
         _cm9_approved_count = sum(1 for _dec in _cm9_approved.values() if _dec.get("decision") == "accepted")
         _cm9_total_fields = len(_cm9_extracted)
         _cm9_ok_count = sum(1 for _ed in _cm9_extracted.values() if _ed.get("validation_status") == "OK")
         render_kpi_row([
             kpi_card_html("Extraction Quality", f"{_cm9_ok_count}/{_cm9_total_fields} fields" if _cm9_total_fields else "Not Available"),
-            kpi_card_html("AI Confirmed", str(_cm9_validation_counts.get("CONFIRMED", 0))),
+            kpi_card_html("AI Confirmed", str(ai_validation.summarize_validation_results(_cm9_ai_results)["buckets"]["confirmed"])),
             kpi_card_html("Fields Requiring Review", str(_cm9_unresolved_count), icon_kind="warning" if _cm9_unresolved_count else "good"),
             kpi_card_html("Approved Corrections", str(_cm9_approved_count)),
         ], columns_per_row=4)

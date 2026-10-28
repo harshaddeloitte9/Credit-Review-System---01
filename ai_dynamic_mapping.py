@@ -192,6 +192,11 @@ class AIFieldMappingResult:
     shortlisted_count: int = 0
     candidate_rankings: tuple = ()
 
+    # False when this result was produced WITHOUT calling the AI
+    # (provider unavailable, time budget exhausted, or no candidate rows
+    # to send) - such a result is never evidence that mapping succeeded.
+    ai_call_made: bool = True
+
 
 def _make_result(field, technical_status, mapping_status, confidence, reason, **overrides):
     kwargs = dict(
@@ -665,7 +670,7 @@ def map_missing_fields(extracted, lines, meta=None, model=DEFAULT_MODEL, base_ur
         for field in trigger_fields:
             mapping_results[field] = _make_result(
                 field, technical_status=AI_UNAVAILABLE, mapping_status=None,
-                confidence=None, reason=availability.detail,
+                confidence=None, reason=availability.detail, ai_call_made=False,
             )
         return augmented, mapping_results, availability
 
@@ -687,7 +692,7 @@ def map_missing_fields(extracted, lines, meta=None, model=DEFAULT_MODEL, base_ur
             for field in batch_fields:
                 mapping_results[field] = _make_result(
                     field, technical_status=AI_SKIPPED, mapping_status=None,
-                    confidence=None, reason=budget_note,
+                    confidence=None, reason=budget_note, ai_call_made=False,
                 )
             continue
 
@@ -704,6 +709,7 @@ def map_missing_fields(extracted, lines, meta=None, model=DEFAULT_MODEL, base_ur
                     candidate_count=ranking_info["candidate_count"],
                     shortlisted_count=ranking_info["shortlisted_count"],
                     candidate_rankings=ranking_info["candidate_rankings"],
+                    ai_call_made=False,
                 )
                 continue
             field_contexts[field] = (line_numbers, ranking_info)
@@ -720,7 +726,7 @@ def map_missing_fields(extracted, lines, meta=None, model=DEFAULT_MODEL, base_ur
             for field in field_contexts:
                 mapping_results[field] = _make_result(
                     field, technical_status=AI_ERROR, mapping_status=None,
-                    confidence=None, reason=f"Ollama call failed: {exc}",
+                    confidence=None, reason=f"{ai_validation.provider_display_name()} call failed: {exc}",
                 )
             continue
 
@@ -742,7 +748,7 @@ def map_missing_fields(extracted, lines, meta=None, model=DEFAULT_MODEL, base_ur
             if field not in validated:
                 mapping_results[field] = _make_result(
                     field, technical_status=AI_ERROR, mapping_status=None, confidence=None,
-                    reason="Ollama's response did not include a valid, schema-conforming mapping result for this field.",
+                    reason=f"{ai_validation.provider_display_name()}'s response did not include a valid, schema-conforming mapping result for this field.",
                 )
                 continue
 

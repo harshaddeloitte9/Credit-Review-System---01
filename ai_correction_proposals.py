@@ -31,7 +31,9 @@ WHICH FIELDS ARE CONSIDERED (see _fields_requiring_correction below):
   or VALUE_SUSPICIOUS. Never CONFIRMED fields. Never NOT_FOUND fields -
   those remain exclusively Phase 2D's presence-check territory; this
   module does not touch them and does not propose extracting a value
-  for a field with no deterministic mapping at all.
+  for a field with no deterministic mapping at all. Never AI_MAPPED
+  fields either - those are decided only through the dynamic-mapping
+  review (see _EXCLUDED_STATUSES).
 
 TWO STATUS VOCABULARIES, same separation of concerns as ai_validation.py:
 
@@ -75,7 +77,7 @@ from ai_validation import (
     _budget_exhausted, _chunk, _clean, _field_context, _group_by_section,
     _ground_evidence, _is_number, _resolve_document_structure,
     _value_appears_in_text,
-    call_ollama, check_ollama_availability,
+    call_ollama, check_ollama_availability, provider_display_name,
 )
 
 # ============================================================
@@ -164,13 +166,28 @@ def _trigger_reason(field_data, ai_result):
     return f"Deterministic: {field_data.get('validation_status')}"
 
 
+# Statuses whose fields are owned by another workflow and must never get
+# a correction proposal:
+#   NOT_FOUND - Phase 2D's presence-check / dynamic-mapping territory.
+#   AI_MAPPED - populated by ai_dynamic_mapping.py and decided through its
+#               own Accept / Reject / Keep as Not Found controls. Both
+#               workflows record into the same approved_corrections[field]
+#               entry, and reviewed_dataset reverts an AI_MAPPED field to
+#               NOT_FOUND on any non-accept decision - so a proposal's
+#               "Reject"/"Keep Original" would silently discard the mapping.
+_EXCLUDED_STATUSES = frozenset({"NOT_FOUND", "AI_MAPPED"})
+
+
 def _fields_requiring_correction(extracted, ai_results):
-    """CONFIRMED and NOT_FOUND fields are never included - NOT_FOUND
-    stays exclusively Phase 2D's presence-check territory (see module
-    docstring)."""
+    """CONFIRMED, NOT_FOUND and AI_MAPPED fields are never included -
+    NOT_FOUND stays exclusively Phase 2D's presence-check territory, and
+    AI_MAPPED fields are decided only through the dynamic-mapping review
+    (see _EXCLUDED_STATUSES). Dynamic mapping only ever produces results
+    for fields that were NOT_FOUND on entry, which leaves them NOT_FOUND
+    or AI_MAPPED, so the two workflows never cover the same field."""
     fields = []
     for field, field_data in extracted.items():
-        if field_data.get("validation_status") == "NOT_FOUND":
+        if field_data.get("validation_status") in _EXCLUDED_STATUSES:
             continue
         det_review_required = field_data.get("validation_status") == "REVIEW_REQUIRED"
         ai_result = ai_results.get(field)
@@ -560,7 +577,7 @@ def generate_correction_proposals(extracted, ai_results, lines, meta=None, model
                 proposals[field] = _make_proposal(
                     field, extracted[field], ai_results.get(field),
                     technical_status=AI_ERROR, proposal_status=None,
-                    confidence=None, reason=f"Ollama call failed: {exc}", requires_review=None,
+                    confidence=None, reason=f"{provider_display_name()} call failed: {exc}", requires_review=None,
                 )
             continue
 
@@ -571,7 +588,7 @@ def generate_correction_proposals(extracted, ai_results, lines, meta=None, model
                 proposals[field] = _make_proposal(
                     field, extracted[field], ai_results.get(field),
                     technical_status=AI_ERROR, proposal_status=None, confidence=None,
-                    reason="Ollama's response did not include a valid, schema-conforming correction result for this field.",
+                    reason=f"{provider_display_name()}'s response did not include a valid, schema-conforming correction result for this field.",
                     requires_review=None,
                 )
                 continue
