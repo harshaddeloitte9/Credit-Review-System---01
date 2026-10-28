@@ -7,6 +7,7 @@ from datetime import datetime
 import streamlit as st
 from openpyxl import load_workbook
 
+import ai_correction_proposals
 import ai_validation
 from reference_data import load_reference_bundle, ReferenceDataError
 from workbook_validation import validate_workbook
@@ -1551,9 +1552,19 @@ elif selected_area == AREAS[1]:
                     }
                     st.session_state["approved_corrections"] = corrections
 
+                # Accept only when the proposal carries valid values that
+                # cannot erase an existing figure (re-checked here so an
+                # older in-session proposal is covered too).
+                _p_acceptable = ai_correction_proposals.proposal_is_acceptable(_p)
+                if not _p_acceptable:
+                    st.caption(
+                        "Accept is unavailable: this proposal has no valid proposed value to apply, "
+                        "so accepting it could erase the extracted figures. Reject it or keep the original."
+                    )
                 _btn_cols = st.columns(3)
                 with _btn_cols[0]:
-                    if st.button("✓ Accept Proposal", key=f"accept_{_field}", width="stretch"):
+                    if st.button("✓ Accept Proposal", key=f"accept_{_field}", width="stretch",
+                                 disabled=not _p_acceptable):
                         _record_decision(decision="accepted")
                         st.rerun()
                 with _btn_cols[1]:

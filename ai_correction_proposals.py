@@ -70,6 +70,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+import ocr_pipeline
 from ai_validation import (
     AI_COMPLETED, AI_ERROR, AI_SKIPPED, AI_UNAVAILABLE,
     OllamaAvailability, OllamaCallError,
@@ -392,6 +393,42 @@ def _make_proposal(field, field_data, ai_result, technical_status, proposal_stat
     return AICorrectionProposal(**kwargs)
 
 
+REVIEWABLE_PROPOSAL_STATUSES = frozenset({"PROPOSAL_AVAILABLE", "PROPOSAL_UNVERIFIED"})
+
+
+def proposed_values_problem(proposed_current, proposed_previous, original_current, original_previous):
+    """None if accepting these proposed values is safe, otherwise a short
+    reason. Safe means: at least one proposed value is present, every
+    present value is a valid number, and no existing value would be
+    replaced by nothing (accepting overwrites both fiscal-year values)."""
+    pairs = (
+        ("current", proposed_current, original_current),
+        ("previous", proposed_previous, original_previous),
+    )
+    if all(value is None for _label, value, _original in pairs):
+        return "no proposed value was supplied"
+    for label, value, original in pairs:
+        if value is None:
+            if original is not None:
+                return f"no proposed {label}-year value, but the field already has one - accepting would erase it"
+        elif ocr_pipeline.clean_number(value) is None:
+            return f"proposed {label}-year value {value!r} is not a valid number"
+    return None
+
+
+def proposal_is_acceptable(proposal):
+    """True only for a reviewable proposal whose values are safe to apply
+    - re-checked at decision time so an older in-session proposal created
+    before check D existed can never be accepted either."""
+    return (
+        proposal.proposal_status in REVIEWABLE_PROPOSAL_STATUSES
+        and proposed_values_problem(
+            proposal.proposed_value_current, proposal.proposed_value_previous,
+            proposal.original_value_current, proposal.original_value_previous,
+        ) is None
+    )
+
+
 def _finalize_proposal(field, field_data, ai_result, v, context_line_numbers, context_text,
                         layout_lines, meta):
     """Runs the deterministic re-verification (A-E from the Phase 3A
@@ -440,6 +477,17 @@ def _finalize_proposal(field, field_data, ai_result, v, context_line_numbers, co
     for value in (v["proposed_value_current"], v["proposed_value_previous"]):
         if value is not None and not _value_appears_in_text(value, proposed_row_norm):
             return _rejected(f"proposed value {value!r} does not appear on the proposed source line")
+
+    # D. Accepting a proposal replaces BOTH fiscal-year values (see
+    # reviewed_dataset.build_reviewed_extracted), so it must carry at
+    # least one valid number and must never replace an existing value
+    # with nothing.
+    problem = proposed_values_problem(
+        v["proposed_value_current"], v["proposed_value_previous"],
+        field_data.get("fy_current"), field_data.get("fy_previous"),
+    )
+    if problem is not None:
+        return _rejected(problem)
 
     # C. Proposed fiscal-year column(s) must be real, detected labels.
     valid_labels = {meta.get("target_current_label"), meta.get("target_previous_label")}

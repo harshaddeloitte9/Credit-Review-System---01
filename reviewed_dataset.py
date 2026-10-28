@@ -91,8 +91,17 @@ def build_reviewed_extracted(extracted, approved_corrections):
         was_ai_mapped = (extracted or {}).get(field, {}).get("validation_status") == "AI_MAPPED"
 
         if outcome == "accepted":
-            reviewed[field]["fy_current"] = ocr_pipeline.clean_number(decision.get("proposed_value_current"))
-            reviewed[field]["fy_previous"] = ocr_pipeline.clean_number(decision.get("proposed_value_previous"))
+            new_current = ocr_pipeline.clean_number(decision.get("proposed_value_current"))
+            new_previous = ocr_pipeline.clean_number(decision.get("proposed_value_previous"))
+            # Never let an acceptance replace an existing figure with
+            # nothing (e.g. a value-less proposal accepted before
+            # ai_correction_proposals' check D existed) - such a record is
+            # ignored and the original values keep flowing.
+            if ((new_current is None and reviewed[field].get("fy_current") is not None)
+                    or (new_previous is None and reviewed[field].get("fy_previous") is not None)):
+                continue
+            reviewed[field]["fy_current"] = new_current
+            reviewed[field]["fy_previous"] = new_previous
             reviewed[field]["ambiguous"] = False
             reviewed[field]["validation_status"] = "HUMAN_APPROVED_CORRECTION"
             reviewed[field]["source_line_number"] = decision.get("proposed_source_line_number")

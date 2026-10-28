@@ -615,14 +615,22 @@ import pytest
 import ocr_pipeline
 
 
-def _synthetic_ocr_text():
+def _synthetic_ocr_text(ambiguous_cash=False):
     """An invented two-year balance sheet: 9 template fields extract as
     deterministic OK and the other 34 are genuinely NOT_FOUND. Every
     data row is claimed by one of those 9 fields, so dynamic mapping has
-    no candidate rows for any NOT_FOUND field."""
+    no candidate rows for any NOT_FOUND field.
+
+    ambiguous_cash=True replaces the Cash row with a lone figure halfway
+    between the two year columns (test_ai_validation's own ambiguous
+    pattern), making Cash genuinely deterministic REVIEW_REQUIRED."""
     def row(label, current, previous):
         return f"{label:<60}{current:>18}{previous:>18}"
 
+    cash_row = (
+        "    (iii) Cash and cash equivalents" + " " * 48 + "45" if ambiguous_cash
+        else row("    (iii) Cash and cash equivalents", 25, 30)
+    )
     return "\n".join([
         "Statement of Standalone Audited Balance Sheet as at 31 March, 2026",
         "Particulars" + " " * 49 + "As at".rjust(18) + "As at".rjust(18),
@@ -634,7 +642,7 @@ def _synthetic_ocr_text():
         row("    (a) Property, plant and equipment", 900, 850),
         "(2) Current assets",
         row("    (a) Current investments", 120, 110),
-        row("    (iii) Cash and cash equivalents", 25, 30),
+        cash_row,
         row("    (iv) Other balances with banks", 37, 41),
         row("Total current assets", 600, 560),
         row("Total assets", 2000, 1800),
@@ -995,9 +1003,9 @@ def test_mapping_exception_render():
 
 # ---- ISSUE 1: Data Review mapping-status messaging -----------------
 
-def _upload_synthetic(at, tag):
+def _upload_synthetic(at, tag, text=None):
     real_run_ocr = ocr_upload.run_ocr
-    text = _synthetic_ocr_text()
+    text = text or _synthetic_ocr_text()
     ocr_upload.run_ocr = lambda pdf_path: (text, {"status_code": 200})
     try:
         _upload(at, b"%PDF-1.4 synthetic " + tag.encode() + b" " + uuid.uuid4().hex.encode())
@@ -1005,11 +1013,11 @@ def _upload_synthetic(at, tag):
         ocr_upload.run_ocr = real_run_ocr
 
 
-def _data_review(patch, tag):
+def _data_review(patch, tag, text=None):
     with patch:
         at = AppTest.from_file("app.py")
         at.run(timeout=60)
-        _upload_synthetic(at, tag)
+        _upload_synthetic(at, tag, text)
         assert not at.exception, "upload raised an exception"
         at.sidebar.radio[0].set_value("2. Data Review")
         at.run(timeout=60)
@@ -1549,6 +1557,210 @@ def test_data_review_ai_mapped_field_has_only_mapping_controls():
     assert at.session_state["approved_corrections"][_MAPPED_FIELD]["decision"] == "accepted"
     assert at.session_state["extracted"][_MAPPED_FIELD]["fy_current"] == 77.0, "raw extracted data was modified"
     assert at.session_state["reviewed_workbook_path"] is not None
+
+
+# ---- "Review Required" KPI: deterministic status only ----------------
+#
+# The Extraction Summary's OK / Review Required / Not Found cards
+# partition the fields by DETERMINISTIC status (display_field_status).
+# AI concerns are counted separately (AI Flagged) and never change a
+# deterministic status - so AI-flagged fields with requires_review=True
+# must not raise "Review Required", and nothing may be counted twice.
+
+def _deterministic_partition_holds(k):
+    return k["Successfully Extracted"] + k["Review Required"] + k["Not Found"] == k["Total Fields"]
+
+
+def _ai_cards_total(k):
+    return k["AI Confirmed"] + k["AI Flagged"] + k["AI Not Validated"] + k["AI Technical Errors"]
+
+
+def test_review_required_is_not_raised_by_ai_flags():
+    def _plan(fields):
+        C = ai_validation.AI_COMPLETED
+        return {fields[0]: (C, "YEAR_MISMATCH", True), fields[1]: (C, "FIELD_MISMATCH", True),
+                fields[2]: (C, "CONFIRMED", False)}
+
+    at = _data_review(_AiPatch(validate=_make_fake_validate(_plan)), "rr-ai-flags")
+    k = _kpis(at)
+    assert k["Review Required"] == 0, "AI flags must not raise the deterministic Review Required count"
+    assert k["Successfully Extracted"] == _SYNTHETIC_OK and k["Not Found"] == _SYNTHETIC_NOT_FOUND
+    assert _deterministic_partition_holds(k), "OK + Review Required + Not Found must equal Total Fields"
+    assert k["AI Flagged"] == 2 and k["AI Confirmed"] == 1, "AI buckets"
+    assert _ai_cards_total(k) == _SYNTHETIC_OK, "AI cards must cover each validated field exactly once"
+    flagged = [f for f, r in at.session_state["ai_validation_results"].items() if r.requires_review]
+    assert len(flagged) == 2
+    assert all(at.session_state["extracted"][f]["validation_status"] == "OK" for f in flagged), \
+        "an AI flag must not change a deterministic status"
+
+
+def test_review_required_counts_deterministic_review_fields():
+    text = _synthetic_ocr_text(ambiguous_cash=True)
+    extracted, _debug, _meta = ocr_pipeline.extract_financial_values(text, ocr_pipeline.TEMPLATE_FILE)
+    assert extracted["Cash"]["validation_status"] == "REVIEW_REQUIRED", "fixture must produce an ambiguous Cash row"
+
+    def _plan(fields):
+        C = ai_validation.AI_COMPLETED
+        other = next(f for f in fields if f != "Cash")
+        # Cash is deterministically uncertain but AI-confirmed; another
+        # field is deterministically OK but AI-flagged - the two axes
+        # are independent.
+        return {"Cash": (C, "CONFIRMED", False), other: (C, "YEAR_MISMATCH", True)}
+
+    at = _data_review(_AiPatch(validate=_make_fake_validate(_plan)), "rr-deterministic", text)
+    k = _kpis(at)
+    statuses = [ed.get("validation_status") for ed in at.session_state["extracted"].values()]
+    assert k["Review Required"] == statuses.count("REVIEW_REQUIRED") == 1, "deterministic Review Required count"
+    assert k["Successfully Extracted"] == statuses.count("OK")
+    assert k["Not Found"] == statuses.count("NOT_FOUND")
+    assert _deterministic_partition_holds(k), "OK + Review Required + Not Found must equal Total Fields"
+    assert k["AI Confirmed"] == 1 and k["AI Flagged"] == 1, "AI buckets"
+    sendable = len(statuses) - statuses.count("NOT_FOUND")
+    assert _ai_cards_total(k) == sendable, "AI cards must cover each validated field exactly once"
+
+
+# ---- Value-less correction proposals can never erase a value ---------
+#
+# Reproduces the reported Revenue case: the model answered PROPOSAL_FOUND
+# for the SAME line with real column labels but NO proposed values. That
+# used to pass verification as PROPOSAL_AVAILABLE, and Accept then set
+# both fiscal-year values to None in the reviewed dataset.
+
+_LABELS = {"target_current_label": "FY26", "target_previous_label": "FY25"}
+_ORIGINAL = {"validation_status": "OK", "fy_current": 100.0, "fy_previous": 90.0,
+             "source_line_number": 3, "source_text": "Revenue  100  90"}
+_LAYOUT = ["", "", "", "Revenue  100  90"]
+
+
+def _finalize(proposed_current, proposed_previous, original=None):
+    v = {
+        "status": "PROPOSAL_FOUND", "confidence": 0.8, "reason": "mocked", "requires_review": True,
+        "proposed_source_line_number": 3,
+        "proposed_column_current_label": "FY26", "proposed_column_previous_label": "FY25",
+        "proposed_value_current": proposed_current, "proposed_value_previous": proposed_previous,
+        "evidence_line_numbers": [], "evidence_values": [],
+    }
+    return ai_correction_proposals._finalize_proposal(
+        "Revenue", original or _ORIGINAL, None, v, {3}, "Revenue 100 90", _LAYOUT, _LABELS,
+    )
+
+
+def test_valueless_proposal_is_rejected():
+    p = _finalize(None, None)
+    assert p.proposal_status == "PROPOSAL_REJECTED_BY_EVIDENCE"
+    assert "no proposed value was supplied" in p.reason
+    assert not ai_correction_proposals.proposal_is_acceptable(p)
+
+
+def test_proposal_value_checks():
+    # Erasing one existing value is rejected; a missing value is fine only
+    # when the field had none for that year; an unparseable value is rejected.
+    assert _finalize(90, None).proposal_status == "PROPOSAL_REJECTED_BY_EVIDENCE"
+    no_previous = dict(_ORIGINAL, fy_previous=None, source_text="Revenue  100", )
+    assert _finalize(100, None, original=no_previous).proposal_status == "PROPOSAL_AVAILABLE"
+    problem = ai_correction_proposals.proposed_values_problem("abc", 90, 100.0, 90.0)
+    assert problem is not None and "not a valid number" in problem
+    # A genuine swapped-columns proposal is still offered and acceptable.
+    swap = _finalize(90, 100)
+    assert swap.proposal_status == "PROPOSAL_AVAILABLE"
+    assert ai_correction_proposals.proposal_is_acceptable(swap)
+
+
+def _valueless_proposal_call(prompt, *a, **k):
+    """Mocked correction response: PROPOSAL_FOUND on the field's own line
+    with real column labels but no values - the reported Revenue case."""
+    __tracebackhide__ = True
+    contexts = json.loads(prompt.split("FIELDS:\n", 1)[1])
+    results = []
+    for ctx in contexts:
+        current_label, previous_label = list(ctx["deterministic_mapping"].keys())
+        line = ctx["target_row"]["line_number"]
+        results.append({
+            "field": ctx["field"], "status": "PROPOSAL_FOUND", "confidence": 0.8,
+            "reason": "not enough evidence to confirm a better mapping (mocked)", "requires_review": True,
+            "proposed_source_line_number": line,
+            "proposed_column_current_label": current_label, "proposed_column_previous_label": previous_label,
+            "proposed_value_current": None, "proposed_value_previous": None,
+            "evidence_line_numbers": [], "evidence_values": [],
+        })
+    return json.dumps({"results": results})
+
+
+def test_real_generation_rejects_valueless_proposal():
+    extracted, meta, lines, layout = _synthetic_extraction()
+    ai_results = _flagged(extracted, _NORMAL_FIELD)
+    with _AiPatch(check=_available, call=_valueless_proposal_call):
+        proposals, _av = ai_correction_proposals.generate_correction_proposals(
+            extracted, ai_results, lines, meta, layout_lines=layout,
+        )
+    p = proposals[_NORMAL_FIELD]
+    assert p.proposal_status == "PROPOSAL_REJECTED_BY_EVIDENCE", "a value-less proposal must not be offered"
+    assert not ai_correction_proposals.proposal_is_acceptable(p)
+
+
+def test_reviewed_dataset_never_erases_on_valueless_acceptance():
+    import reviewed_dataset
+
+    extracted = {"Revenue": dict(_ORIGINAL)}
+    accepted = {"Revenue": {"decision": "accepted", "proposed_value_current": None, "proposed_value_previous": None,
+                            "proposed_source_line_number": 3, "proposed_source_text": "Revenue  100  90"}}
+    reviewed = reviewed_dataset.build_reviewed_extracted(extracted, accepted)["Revenue"]
+    assert (reviewed["fy_current"], reviewed["fy_previous"]) == (100.0, 90.0), "a value-less acceptance erased values"
+    assert reviewed["validation_status"] == "OK"
+    # Rejected / kept original never change a normally extracted field.
+    for decision in ("rejected", "kept_original"):
+        out = reviewed_dataset.build_reviewed_extracted(extracted, {"Revenue": {"decision": decision}})["Revenue"]
+        assert (out["fy_current"], out["fy_previous"]) == (100.0, 90.0)
+    # A valid acceptance still applies.
+    swap = dict(accepted["Revenue"], proposed_value_current="90", proposed_value_previous="100")
+    out = reviewed_dataset.build_reviewed_extracted(extracted, {"Revenue": swap})["Revenue"]
+    assert (out["fy_current"], out["fy_previous"]) == (90.0, 100.0)
+    assert out["validation_status"] == "HUMAN_APPROVED_CORRECTION"
+    assert extracted["Revenue"]["fy_current"] == 100.0, "raw extracted data was modified"
+
+
+def _flag_normal_field(extracted, lines, meta=None, layout_lines=None, **k):
+    return _flagged(extracted, _NORMAL_FIELD), {}, _available()
+
+
+def test_data_review_offers_no_valueless_proposal():
+    at = _data_review(
+        _AiPatch(check=_available, call=_valueless_proposal_call,
+                 map_missing=_fake_map(lambda nf: ({}, None)), validate=_flag_normal_field),
+        "valueless-real",
+    )
+    assert at.session_state["correction_proposals"][_NORMAL_FIELD].proposal_status == "PROPOSAL_REJECTED_BY_EVIDENCE"
+    keys = {w.key for w in at.button}
+    assert f"accept_{_NORMAL_FIELD}" not in keys, "a value-less proposal was offered for a decision"
+    assert _kpis(at)["Correction Proposals"] == 0
+    assert "No correction proposals require a decision for this document." in _page_text(at)
+
+
+def test_data_review_disables_accept_for_stale_valueless_proposal():
+    # A value-less PROPOSAL_AVAILABLE created before the fix (e.g. still in
+    # a running session) must not be acceptable.
+    def _stale_generator(extracted, ai_results, lines, meta=None, layout_lines=None, **k):
+        ed = extracted[_NORMAL_FIELD]
+        p = ai_correction_proposals._make_proposal(
+            _NORMAL_FIELD, ed, None, technical_status=ai_validation.AI_COMPLETED,
+            proposal_status="PROPOSAL_AVAILABLE", confidence=0.8, reason="mocked stale proposal",
+            requires_review=True, proposed_source_line_number=ed.get("source_line_number"),
+            proposed_column_current_label="2026", proposed_column_previous_label="2025",
+            proposed_value_current=None, proposed_value_previous=None,
+        )
+        return {_NORMAL_FIELD: p}, _available()
+
+    at = _data_review(_AiPatch(corrections=_stale_generator), "valueless-stale")
+    original = dict(at.session_state["extracted"][_NORMAL_FIELD])
+    buttons = {w.key: w for w in at.button}
+    assert buttons[f"accept_{_NORMAL_FIELD}"].disabled, "Accept must be disabled for a value-less proposal"
+    assert not buttons[f"reject_{_NORMAL_FIELD}"].disabled and not buttons[f"keep_{_NORMAL_FIELD}"].disabled
+    assert "Accept is unavailable" in _page_text(at)
+
+    _click_button(at, f"keep_{_NORMAL_FIELD}")
+    assert at.session_state["approved_corrections"][_NORMAL_FIELD]["decision"] == "kept_original"
+    assert at.session_state["extracted"][_NORMAL_FIELD] == original, "raw extracted data was modified"
+    assert at.session_state["reviewed_workbook_path"] is None
 
 
 def main():
