@@ -21,8 +21,8 @@ from financial_analysis import build_financial_analysis
 from risk_scoring import build_risk_scoring
 from covenants import load_covenant_policy, build_covenants
 from collateral_assessment import (
-    load_collateral_inputs, build_collateral_assessment,
-    compute_post_sanction_coverage, POST_SANCTION_BASIS_LABEL,
+    load_collateral_inputs, load_collateral_reference, build_collateral_assessment,
+    compute_post_sanction_coverage, POST_SANCTION_BASIS_LABEL, analyst_collateral_for_borrower,
 )
 from limit_setting import (
     load_limit_setting_policy, build_limit_setting, LimitSettingResult,
@@ -2293,7 +2293,36 @@ elif selected_area == AREAS[5]:
     # valuation/security document), so real collateral data can only ever
     # be genuine in Advanced/uploaded-workbook mode, where the analyst
     # supplies a complete, independent workbook of their own.
-    collateral_inputs = load_collateral_inputs(bundle.workbook_path) if _using_upload else None
+    # PDF borrower: the analyst-prepared workbook's collateral schedule is
+    # used automatically, but only when that workbook's own statement figures
+    # are this borrower's (collateral_assessment.analyst_collateral_for_
+    # borrower); every other borrower gets the unavailable view below.
+    if _using_upload:
+        collateral_inputs = load_collateral_inputs(bundle.workbook_path)
+    elif _using_pdf:
+        collateral_inputs = analyst_collateral_for_borrower(st.session_state.get("extracted"))
+    else:
+        collateral_inputs = None
+
+    def _render_collateral_reference(typical_haircuts, rating_bands, expanded=False):
+        """Generic guidance (industry haircut ranges, coverage rating bands)
+        - the same for every borrower, so shown with or without borrower data."""
+        with st.expander("Reference: typical haircut ranges by collateral type (industry context, not used in the calculation)", expanded=expanded):
+            typical_rows = [{"Collateral Type": t, "Typical Haircut": h} for t, h in typical_haircuts]
+            render_html_table(typical_rows, columns=["Collateral Type", "Typical Haircut"])
+
+        with st.expander("Reference: collateral coverage rating bands", expanded=expanded):
+            # Column header says "(%)" explicitly - the band labels
+            # themselves (">125", "100-125", "<100") are read verbatim
+            # from the reference workbook and are percentage cut-points,
+            # the same unit the KPI above already shows alongside the
+            # "x" multiple (e.g. "2.05x (~205%)") - never rescaled or
+            # retyped here, just labelled unambiguously.
+            band_rows = [
+                {"Coverage Ratio (%)": label, "Interpretation": interp, "Credit View": view}
+                for label, interp, view in rating_bands
+            ]
+            render_html_table(band_rows, columns=["Coverage Ratio (%)", "Interpretation", "Credit View"])
 
     if collateral_inputs is None:
         st.markdown(badge_html("Unavailable", "neutral"), unsafe_allow_html=True)
@@ -2306,7 +2335,8 @@ elif selected_area == AREAS[5]:
                 "Balance Sheet. This is never derivable from '1-Input Data' either (no Trade "
                 "Receivables, Investments-beyond-current, or Inventory fields), so no figures are "
                 "shown here - the reference workbook's (Tata Steel's) collateral values are never "
-                "substituted in as a stand-in for this or any other PDF-uploaded borrower."
+                "substituted in as a stand-in for any borrower whose own financial statements do "
+                "not match that workbook."
             )
         else:
             st.warning(
@@ -2316,6 +2346,48 @@ elif selected_area == AREAS[5]:
                 "Investments-beyond-current, or Inventory fields), so no figures are shown here - "
                 "the reference workbook's (Tata Steel's) collateral values are never substituted "
                 "in as a fallback."
+            )
+
+        # Reference-only view: the assessment structure and generic guidance,
+        # with every borrower-specific figure marked as required input. Book
+        # values, schedule haircuts and assessments are never read for this
+        # borrower (see collateral_assessment.load_collateral_reference).
+        collateral_reference = load_collateral_reference(bundle.workbook_path)
+        if collateral_reference is not None:
+            _total_debt = fa.derived.total_debt.current
+            render_kpi_row([
+                kpi_card_html("Total Adjusted Collateral Value", "Analyst input required",
+                              sublabel="Needs book values from a valuation/security document"),
+                kpi_card_html("Assumed Debt Exposure", fmt_money_cr(_total_debt) if _total_debt is not None else "Not Available",
+                              sublabel="= Total Debt, from this borrower's Input Data"),
+                kpi_card_html("Existing Coverage Ratio", "Not Available",
+                              sublabel="Requires collateral values for this borrower"),
+            ], columns_per_row=3)
+
+            render_section(
+                "Collateral Schedule",
+                "Asset classes assessed. Book values, haircuts and assessments must come from this "
+                "borrower's own valuation or security documents.",
+            )
+            render_html_table(
+                [
+                    {
+                        "Collateral Type": label,
+                        "Book Value": "Analyst input required",
+                        "Haircut %": "Analyst input required",
+                        "Adjusted Value": "—",
+                        "Liquidity": liquidity or "—",
+                        "Security Rank": rank or "—",
+                        "Assessment": "Not assessed",
+                    }
+                    for label, liquidity, rank in collateral_reference.asset_classes
+                ],
+                columns=["Collateral Type", "Book Value", "Haircut %", "Adjusted Value", "Liquidity", "Security Rank", "Assessment"],
+            )
+            st.caption("The book value vs adjusted value chart appears once collateral values are available for this borrower.")
+
+            _render_collateral_reference(
+                collateral_reference.typical_haircuts, collateral_reference.rating_bands, expanded=True,
             )
     else:
         collateral = build_collateral_assessment(collateral_inputs, fa.derived.total_debt.current)
@@ -2405,22 +2477,7 @@ elif selected_area == AREAS[5]:
         )
         st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
 
-        with st.expander("Reference: typical haircut ranges by collateral type (industry context, not used in the calculation)"):
-            typical_rows = [{"Collateral Type": t, "Typical Haircut": h} for t, h in collateral_inputs.typical_haircuts]
-            render_html_table(typical_rows, columns=["Collateral Type", "Typical Haircut"])
-
-        with st.expander("Reference: collateral coverage rating bands"):
-            # Column header says "(%)" explicitly - the band labels
-            # themselves (">125", "100-125", "<100") are read verbatim
-            # from the reference workbook and are percentage cut-points,
-            # the same unit the KPI above already shows alongside the
-            # "x" multiple (e.g. "2.05x (~205%)") - never rescaled or
-            # retyped here, just labelled unambiguously.
-            band_rows = [
-                {"Coverage Ratio (%)": label, "Interpretation": interp, "Credit View": view}
-                for label, interp, view in collateral_inputs.rating_bands
-            ]
-            render_html_table(band_rows, columns=["Coverage Ratio (%)", "Interpretation", "Credit View"])
+        _render_collateral_reference(collateral_inputs.typical_haircuts, collateral_inputs.rating_bands)
 
     render_stage_nav(5, "Accept & Continue →")
 
@@ -2877,7 +2934,12 @@ elif selected_area == AREAS[8]:
     # Same PDF-vs-Advanced-mode gate as the Collateral Assessment page
     # itself (AREAS[5] above) - a PDF-uploaded borrower's collateral sheet
     # is always Tata Steel's own, never this borrower's.
-    cm9_coll_inputs = load_collateral_inputs(bundle.workbook_path) if _using_upload else None
+    if _using_upload:
+        cm9_coll_inputs = load_collateral_inputs(bundle.workbook_path)
+    elif _using_pdf:
+        cm9_coll_inputs = analyst_collateral_for_borrower(st.session_state.get("extracted"))   # same verified source as the Collateral page
+    else:
+        cm9_coll_inputs = None
     cm9_collateral = (
         build_collateral_assessment(cm9_coll_inputs, fa.derived.total_debt.current)
         if cm9_coll_inputs else None

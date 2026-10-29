@@ -1990,6 +1990,226 @@ def test_excel_upload_option_is_demonstration_only():
     assert at.session_state["source_mode"] == "none", "Excel selection activated a data source"
 
 
+# ---- Collateral Assessment: reference view for a PDF-uploaded borrower ----
+
+def _reference_workbook_schedule():
+    """The reference workbook's OWN (Tata Steel's) collateral schedule cells,
+    read live - the values that must never appear for another borrower."""
+    from openpyxl import load_workbook
+    import collateral_assessment as ca
+
+    ws = load_workbook("Credit Review Automation Example.xlsx", data_only=True)[ca.COLLATERAL_SHEET]
+    return [
+        {"book": ws[f"B{r}"].value, "haircut": ws[f"C{r}"].value, "assessment": ws[f"G{r}"].value}
+        for r in ca._ASSET_ROWS
+    ]
+
+
+def test_collateral_reference_never_contains_borrower_figures():
+    import collateral_assessment as ca
+
+    ref = ca.load_collateral_reference("Credit Review Automation Example.xlsx")
+    assert ref is not None and len(ref.asset_classes) == 5 and len(ref.rating_bands) == 3
+    assert {f.name for f in __import__("dataclasses").fields(ref)} == {"asset_classes", "rating_bands", "typical_haircuts"}
+    schedule = _reference_workbook_schedule()
+    flat = [str(v) for item in ref.asset_classes for v in item]
+    for row in schedule:
+        assert all(str(row[key]) not in flat for key in ("book", "haircut", "assessment")), \
+            "the reference view carried a borrower-specific schedule value"
+
+
+def test_collateral_page_for_pdf_borrower_shows_reference_only():
+    import app
+
+    at = _data_review(_AiPatch(), "collateral")
+    at.sidebar.radio[0].set_value("6. Collateral Assessment")
+    at.run(timeout=60)
+    assert not at.exception, "Collateral Assessment raised an exception"
+    text = _page_text(at)
+    html_text = _raw_markdown_html(at)
+
+    # The missing-data state stays explicit.
+    assert "Unavailable" in html_text and "Collateral data unavailable" in _warnings(at), "unavailable state missing"
+    # Structure and generic guidance are shown.
+    for label in ("Cash & Bank Balances", "Investments", "Trade Receivables", "Inventory", "Property Plant & Equipment"):
+        assert label in html_text, f"schedule row {label!r} missing"
+    assert html_text.count("Analyst input required") >= 10, "book value / haircut cells must ask for analyst input"
+    for guidance in ("0%-10%", "40%-60%", ">125", "100-125", "<100", "Low collateral risk"):
+        assert guidance in html_text, f"reference guidance {guidance!r} missing"
+    k = _kpis(at)
+    assert k == {}, "no numeric collateral KPI may be computed without borrower collateral data"
+    assert "Total Adjusted Collateral Value" in html_text and "Existing Coverage Ratio" in html_text
+    # No figure from the reference workbook's own (Tata Steel's) schedule.
+    for row in _reference_workbook_schedule():
+        for rendered in (app.fmt_money_cr(row["book"]), f"{row['book']:,.0f}", f"{row['book']:,.2f}"):
+            assert rendered not in text, "a reference-workbook book value leaked into this borrower's page"
+        assert f">{row['haircut']:.0f}%<" not in html_text, "a reference-workbook schedule haircut leaked"
+        assert row["assessment"] not in html_text, "a reference-workbook assessment leaked"
+    assert len(at.get("plotly_chart")) == 0, "no chart may be drawn without collateral values"
+    # Navigation is intact.
+    labels = [w.label for w in at.button]
+    assert any("Previous Step" in l for l in labels) and any("Accept & Continue" in l for l in labels)
+
+
+# ---- Collateral Assessment: analyst collateral workbook for a PDF borrower ----
+
+_EXAMPLE_WORKBOOK = "Credit Review Automation Example.xlsx"
+
+
+def _collateral_borrower_text():
+    """The synthetic borrower plus a non-current borrowings row, so five core
+    statement figures exist for the workbook identity check."""
+    row = lambda label, cur, prev: f"{label:<60}{cur:>18}{prev:>18}"
+    return _synthetic_ocr_text().replace(
+        "II. EQUITY AND LIABILITIES",
+        "II. EQUITY AND LIABILITIES\n" + row("    (a) Borrowings - non-current", 300, 280),
+    )
+
+
+_INVENTED_SCHEDULE = [(500.0, 5.0), (800.0, 30.0), (200.0, 25.0), (300.0, 50.0), (1500.0, 45.0)]
+
+
+def _matching_analyst_workbook(tmp_dir):
+    """An analyst workbook for the SYNTHETIC borrower: the example workbook's
+    layout, with its '1-Input Data' core figures set to the synthetic
+    borrower's own and an invented collateral schedule."""
+    from openpyxl import load_workbook
+    import collateral_assessment as ca
+
+    extracted, _d, _m = ocr_pipeline.extract_financial_values(_collateral_borrower_text(), ocr_pipeline.TEMPLATE_FILE)
+    wb = load_workbook(_EXAMPLE_WORKBOOK)
+    ws_in, ws_coll = wb["1-Input Data"], wb[ca.COLLATERAL_SHEET]
+    ws_in["A1"] = "Invented Borrower Limited (test workbook)"
+    for field in ca.IDENTITY_FIELDS:
+        ws_in[f"B{ocr_pipeline.ROW_MAPPING[field]}"] = extracted[field]["fy_current"]
+    for row, (book, haircut) in zip(ca._ASSET_ROWS, _INVENTED_SCHEDULE):
+        ws_coll[f"B{row}"], ws_coll[f"C{row}"] = book, haircut
+    path = os.path.join(tmp_dir, "invented_borrower_review.xlsx")
+    wb.save(path)
+    return path
+
+
+@contextlib.contextmanager
+def _analyst_workbook(path):
+    """Points the app's analyst workbook at `path` for the duration."""
+    import collateral_assessment as ca
+
+    real = ca.ANALYST_WORKBOOK_PATH
+    ca.ANALYST_WORKBOOK_PATH = path
+    try:
+        yield
+    finally:
+        ca.ANALYST_WORKBOOK_PATH = real
+
+
+def _collateral_page(text, tag):
+    at = _data_review(_AiPatch(), tag, text)
+    at.sidebar.radio[0].set_value("6. Collateral Assessment")
+    at.run(timeout=120)
+    assert not at.exception, "Collateral Assessment raised an exception"
+    assert not any((u.key or "").startswith("collateral") for u in at.file_uploader), \
+        "the Collateral page must not add an upload step"
+    return at
+
+
+def _assert_no_reference_workbook_figures(at):
+    import app
+
+    text, html_text = _page_text(at), _raw_markdown_html(at)
+    for row in _reference_workbook_schedule():
+        for rendered in (app.fmt_money_cr(row["book"]), f"{row['book']:,.0f}"):
+            assert rendered not in text and rendered not in html_text, "a reference-workbook collateral figure leaked"
+
+
+def test_matching_borrower_gets_full_assessment_automatically(tmp_path):
+    import app
+
+    with _analyst_workbook(_matching_analyst_workbook(str(tmp_path))):
+        at = _collateral_page(_collateral_borrower_text(), "coll-match")
+        html_text = _raw_markdown_html(at)
+    adjusted = sum(b * (1 - h / 100) for b, h in _INVENTED_SCHEDULE)
+    assert app.fmt_money_cr(adjusted) in html_text, "Total Adjusted Collateral Value not computed from the workbook"
+    for book, haircut in _INVENTED_SCHEDULE:
+        assert app.fmt_money_cr(book) in html_text and f">{haircut:.0f}%<" in html_text, "schedule row missing"
+    assert len(at.get("plotly_chart")) == 1, "book vs adjusted value chart missing"
+    for guidance in ("0%-10%", ">125", "Low collateral risk"):
+        assert guidance in html_text, f"reference guidance {guidance!r} missing"
+    assert "Collateral data unavailable" not in _warnings(at)
+    _assert_no_reference_workbook_figures(at)
+
+
+def test_other_borrower_gets_no_analyst_collateral():
+    # The real analyst workbook (Tata Steel's) against an unrelated borrower.
+    at = _collateral_page(_collateral_borrower_text(), "coll-other")
+    assert "Collateral data unavailable" in _warnings(at), "reference-only state not kept"
+    assert "Analyst input required" in _raw_markdown_html(at)
+    assert len(at.get("plotly_chart")) == 0
+    _assert_no_reference_workbook_figures(at)
+
+
+def test_collateral_follows_the_current_borrower(tmp_path):
+    import app
+
+    with _analyst_workbook(_matching_analyst_workbook(str(tmp_path))):
+        at = _collateral_page(_collateral_borrower_text(), "coll-switch")
+        adjusted = app.fmt_money_cr(sum(b * (1 - h / 100) for b, h in _INVENTED_SCHEDULE))
+        assert adjusted in _raw_markdown_html(at), "fixture: the matching borrower should get the schedule"
+        # A different borrower uploaded in the same session must not keep it.
+        at.sidebar.radio[0].set_value("1. Data Upload")
+        at.run(timeout=120)
+        with _AiPatch():
+            _upload_synthetic(at, "coll-switch-second", _synthetic_ocr_text())
+        at.sidebar.radio[0].set_value("6. Collateral Assessment")
+        at.run(timeout=120)
+        html_text = _raw_markdown_html(at)
+    assert adjusted not in html_text, "the previous borrower's collateral carried over"
+    assert "Collateral data unavailable" in _warnings(at)
+
+
+def _cached_ocr(company):
+    import glob as _glob
+
+    for path in _glob.glob(os.path.join(tempfile.gettempdir(), "credit_review_tool_pdf_upload", "raw_ocr_cache_*.txt")):
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        if company in text.lower():
+            return text
+    pytest.skip(f"No cached {company.title()} OCR text on this machine (needed for this real-document check).")
+
+
+def test_tata_steel_pdf_shows_its_analyst_collateral_automatically():
+    from openpyxl import load_workbook
+    import app
+
+    at = _collateral_page(_cached_ocr("tata steel"), "coll-tata-steel")
+    ws = load_workbook(_EXAMPLE_WORKBOOK, data_only=True)["5-Collateral Assessment"]
+    html_text = _raw_markdown_html(at)
+    assert "Collateral data unavailable" not in _warnings(at)
+    assert app.fmt_money_cr(ws["D21"].value) in html_text, "Total Adjusted Collateral Value differs from the workbook"
+    assert app.fmt_money_cr(ws["D22"].value) in html_text, "Assumed Debt Exposure differs from the workbook"
+    assert f"{ws['D23'].value:.2f}x" in html_text, "coverage ratio differs from the workbook"
+    for r in range(15, 20):
+        assert app.fmt_money_cr(ws[f"B{r}"].value) in html_text and app.fmt_money_cr(ws[f"D{r}"].value) in html_text
+        assert f">{ws[f'C{r}'].value:.0f}%<" in html_text, "haircut missing"
+        assert ws[f"G{r}"].value in html_text, "assessment text missing"
+    assert len(at.get("plotly_chart")) == 1
+    assert "Low collateral risk" in html_text   # >125% band (see collateral_assessment's unit fix)
+
+    at.sidebar.radio[0].set_value("9. Credit Memo")
+    at.run(timeout=120)
+    assert not at.exception
+    assert f"{ws['D23'].value:.2f}x" in _raw_markdown_html(at), "Credit Memo does not use the verified collateral"
+
+
+def test_tata_chemicals_pdf_never_gets_tata_steel_collateral():
+    at = _collateral_page(_cached_ocr("tata chemicals"), "coll-tata-chem")
+    assert "Collateral data unavailable" in _warnings(at)
+    _assert_no_reference_workbook_figures(at)
+    at.sidebar.radio[0].set_value("9. Credit Memo")
+    at.run(timeout=120)
+    _assert_no_reference_workbook_figures(at)
+
+
 def main():
     test_data_upload_shows_only_five_sections_no_ai_panels()
     test_data_review_business_glossary_column_position()

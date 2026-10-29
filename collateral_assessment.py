@@ -25,7 +25,11 @@ replaces '1-Input Data'), so app.py deliberately does NOT call
 load_collateral_inputs() for a PDF-uploaded borrower (source_mode="pdf") -
 only for Advanced/uploaded-workbook mode, where the analyst supplies a
 complete, independent workbook that may carry its own genuine collateral
-sheet. See app.py's Collateral Assessment page and Credit Memo section.
+sheet - or, for a PDF-uploaded borrower, automatically from the analyst
+workbook (ANALYST_WORKBOOK_PATH) when verify_workbook_borrower() confirms
+its own '1-Input Data' figures are that borrower's (see
+analyst_collateral_for_borrower). See app.py's Collateral Assessment page
+and Credit Memo section.
 
 Formulas reproduced exactly as found in '5-Collateral Assessment':
     Adjusted Value              = Book Value * (1 - Haircut% / 100)   (D15:D19)
@@ -58,6 +62,7 @@ never rescaling coverage_ratio and never touching how it's displayed
 (still "2.05x", same as before) - only the threshold comparison changes.
 """
 
+import os
 from dataclasses import dataclass
 from typing import Optional
 
@@ -144,6 +149,96 @@ def load_collateral_inputs(workbook_path):
     ]
 
     return CollateralInputs(assets_raw=assets_raw, rating_bands=rating_bands, typical_haircuts=typical_haircuts)
+
+
+@dataclass(frozen=True)
+class CollateralReference:
+    """Generic guidance from '5-Collateral Assessment' that is the same for
+    every borrower. Deliberately has NO book values, schedule haircuts or
+    assessment text - those cells (B, C, G of rows 15-19) are the reference
+    workbook's own (Tata Steel's) schedule and are never read here."""
+    asset_classes: list       # [(collateral_type, liquidity, security_rank)]
+    rating_bands: list        # [(band_label, interpretation, credit_view)]
+    typical_haircuts: list    # [(collateral_type, typical_haircut_range)]
+
+
+def load_collateral_reference(workbook_path):
+    """Reference-only view for a borrower with no collateral data of its
+    own (e.g. a PDF upload). Returns None if the sheet or its guidance
+    cells are missing."""
+    wb = load_workbook(workbook_path, data_only=True)
+    if COLLATERAL_SHEET not in wb.sheetnames:
+        return None
+    ws = wb[COLLATERAL_SHEET]
+    asset_classes = [(ws[f"A{row}"].value, ws[f"E{row}"].value, ws[f"F{row}"].value) for row in _ASSET_ROWS]
+    rating_bands = [(ws[f"A{row}"].value, ws[f"B{row}"].value, ws[f"C{row}"].value) for row in (28, 29, 30)]
+    typical_haircuts = [(ws[f"A{row}"].value, ws[f"B{row}"].value) for row in range(4, 11)]
+    if not all(label for label, _l, _r in asset_classes) or not all(b[0] for b in rating_bands):
+        return None
+    return CollateralReference(asset_classes=asset_classes, rating_bands=rating_bands, typical_haircuts=typical_haircuts)
+
+
+# Core statement lines used to confirm that an analyst's collateral
+# workbook belongs to the borrower whose PDF was uploaded: the workbook's
+# own '1-Input Data' current-year figures (column B of the template row,
+# see ocr_pipeline.ROW_MAPPING) must equal the figures extracted from that
+# PDF. Different borrowers' statements never agree on all of these.
+IDENTITY_FIELDS = (
+    "Revenue from operations", "Other income", "Total expenses", "Property, plant",
+    "Total assets", "Total equity", "Borrowings non current", "Cash",
+)
+MIN_IDENTITY_MATCHES = 5
+
+
+def verify_workbook_borrower(workbook_path, extracted):
+    """(True, detail) only if the workbook's '1-Input Data' current-year
+    figures equal this borrower's PDF-extracted figures on at least
+    MIN_IDENTITY_MATCHES core statement lines, with no line disagreeing.
+    (False, reason) otherwise. Reads no collateral values."""
+    import ocr_pipeline
+
+    wb = load_workbook(workbook_path, data_only=True)
+    if "1-Input Data" not in wb.sheetnames or COLLATERAL_SHEET not in wb.sheetnames:
+        return False, "the workbook needs both a '1-Input Data' and a '5-Collateral Assessment' sheet"
+    ws = wb["1-Input Data"]
+    matched, mismatched = [], []
+    for field in IDENTITY_FIELDS:
+        row = ocr_pipeline.ROW_MAPPING.get(field)
+        pdf_value = (extracted or {}).get(field, {}).get("fy_current")
+        wb_value = ws[f"B{row}"].value if row else None
+        if pdf_value is None or not isinstance(wb_value, (int, float)) or isinstance(wb_value, bool):
+            continue
+        (matched if abs(wb_value - pdf_value) <= 0.01 + 1e-6 * abs(wb_value) else mismatched).append(field)
+    borrower = ws["A1"].value
+    if mismatched:
+        return False, (f"its financial statement figures do not match this borrower's PDF "
+                       f"({len(mismatched)} of {len(matched) + len(mismatched)} core figures differ)")
+    if len(matched) < MIN_IDENTITY_MATCHES:
+        return False, (f"too few core figures could be compared to confirm it is the same borrower "
+                       f"({len(matched)} of the {MIN_IDENTITY_MATCHES} required)")
+    return True, f"{len(matched)} of {len(matched)} core statement figures match this borrower's PDF" + (
+        f" · workbook: {borrower}" if isinstance(borrower, str) and borrower.strip() else "")
+
+
+# The analyst-prepared workbook shipped with the app (the same file
+# demo_source.py merges policy sheets from). Its own '1-Input Data' sheet
+# - not the merged workbook's, which is overwritten with the uploaded
+# borrower's figures - identifies which borrower its collateral schedule
+# belongs to.
+ANALYST_WORKBOOK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Credit Review Automation Example.xlsx")
+
+
+def analyst_collateral_for_borrower(extracted, workbook_path=None):
+    """The analyst workbook's collateral inputs for a PDF-uploaded borrower,
+    used automatically - but ONLY when verify_workbook_borrower() confirms
+    the workbook's own statement figures are this borrower's. Any other
+    borrower gets None (the page then shows its unavailable/reference-only
+    view), so the schedule can never appear for a different company."""
+    path = workbook_path or ANALYST_WORKBOOK_PATH
+    if not path or not os.path.exists(path):
+        return None
+    ok, _detail = verify_workbook_borrower(path, extracted)
+    return load_collateral_inputs(path) if ok else None
 
 
 def build_collateral_assessment(inputs: CollateralInputs, debt_exposure: Optional[float]) -> CollateralResult:

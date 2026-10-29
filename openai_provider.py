@@ -51,6 +51,18 @@ def _get_api_key():
         return None
 
 
+def _max_retries():
+    """Retries per OpenAI request (OPENAI_MAX_RETRIES, default 0). The SDK
+    otherwise retries timeouts, 408/409/429 and 5xx twice on its own, so
+    one request could take about 3x the timeout the caller passed - and
+    every AI stage only checks its time budget between batches. With 0,
+    each request is bounded by its own timeout, like the Ollama path."""
+    try:
+        return max(0, int(os.environ.get("OPENAI_MAX_RETRIES", "0")))
+    except ValueError:
+        return 0
+
+
 def check_openai_availability(model, timeout):
     """Mirrors ai_validation.check_ollama_availability()'s own contract
     and philosophy exactly: never raises, never assumes the configured
@@ -73,7 +85,7 @@ def check_openai_availability(model, timeout):
         )
 
     try:
-        client = OpenAI(api_key=api_key, timeout=timeout)
+        client = OpenAI(api_key=api_key, timeout=timeout, max_retries=_max_retries())
         page = client.models.list()
         installed = [m.id for m in page.data]
     except Exception as exc:
@@ -109,7 +121,8 @@ def call_openai(prompt, model, timeout):
     if not api_key:
         raise OllamaCallError("OPENAI_API_KEY is not set.")
 
-    client = OpenAI(api_key=api_key, timeout=timeout)
+    retries = _max_retries()
+    client = OpenAI(api_key=api_key, timeout=timeout, max_retries=retries)
 
     # Caught most-specific-first (AuthenticationError/RateLimitError/
     # NotFoundError are subclasses of APIStatusError/APIError;
@@ -131,7 +144,8 @@ def call_openai(prompt, model, timeout):
     except openai.NotFoundError as exc:
         raise OllamaCallError(f"OpenAI model '{model}' not found / not available to this account ({exc.__class__.__name__}): {exc}") from exc
     except openai.APITimeoutError as exc:
-        raise OllamaCallError(f"OpenAI call timed out after {timeout}s ({exc.__class__.__name__}): {exc}") from exc
+        attempts = f" per attempt, {retries + 1} attempts" if retries else ""
+        raise OllamaCallError(f"OpenAI call timed out after {timeout}s{attempts} ({exc.__class__.__name__}): {exc}") from exc
     except openai.APIConnectionError as exc:
         raise OllamaCallError(f"Could not connect to the OpenAI API ({exc.__class__.__name__}): {exc}") from exc
     except openai.APIError as exc:

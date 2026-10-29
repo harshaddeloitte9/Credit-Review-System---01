@@ -58,7 +58,45 @@ Optional overrides (defaults shown):
 ```powershell
 $env:OPENAI_MODEL = "gpt-4o-mini"            # must be enabled for your account - checked automatically, never assumed
 $env:OPENAI_AVAILABILITY_TIMEOUT = "10"      # seconds
+$env:OPENAI_MAX_RETRIES = "0"                # retries per OpenAI request (see "Timeouts and time budgets")
 ```
+
+`AI_PROVIDER`, `OPENAI_MODEL` and the timeout/budget variables are read
+once, when the app starts. Set them in the SAME PowerShell window you run
+`streamlit run` from, and restart Streamlit after changing them - an
+already-running app keeps the provider it started with.
+
+## Timeouts and time budgets
+
+All three AI stages (validation, dynamic mapping, correction proposals)
+use the same provider selected by `AI_PROVIDER`. Each stage works in
+batches and has its own overall time budget. The budget is checked
+before each batch starts: once it has passed, every batch not yet
+started is marked "skipped (time budget exhausted)" and the stage moves
+on. A batch already in progress is not interrupted, so a stage can run
+for at most its budget plus one request timeout.
+
+| Stage | Budget (seconds) | Per-request timeout (seconds) | Fields per batch |
+|---|---|---|---|
+| AI validation | `AI_VALIDATION_TIME_BUDGET_SECONDS` = 240 | `OLLAMA_CALL_TIMEOUT` = 150 | `AI_VALIDATION_MAX_FIELDS_PER_BATCH` = 1 |
+| AI dynamic mapping | `AI_MAPPING_TIME_BUDGET_SECONDS` = 120 | `AI_MAPPING_CALL_TIMEOUT` = 120 | `AI_MAPPING_MAX_FIELDS_PER_BATCH` = 2 |
+| Correction proposals | `AI_CORRECTION_TIME_BUDGET_SECONDS` = 120 | `AI_CORRECTION_CALL_TIMEOUT` = 120 | `AI_CORRECTION_MAX_FIELDS_PER_BATCH` = 2 |
+
+(`OLLAMA_CALL_TIMEOUT` applies to whichever provider is selected,
+despite its name.)
+
+- "skipped (time budget exhausted)" means the stage's overall budget ran
+  out before some batches could start. A single request that times out
+  is reported differently: as a technical error with the reason
+  "OpenAI call failed: ... timed out ...".
+- The budgets are the same for both providers. They are set per launch,
+  so tune them in the same window as `AI_PROVIDER`. Example for a slow
+  local Ollama on CPU: `$env:AI_MAPPING_TIME_BUDGET_SECONDS = "300"`.
+- `OPENAI_MAX_RETRIES` (default `0`): the OpenAI SDK would otherwise retry
+  timeouts, rate limits (429) and server errors twice on its own, so one
+  request could take about three times its timeout. With `0`, each
+  request takes at most its timeout. Raising it to `N` allows up to
+  `N + 1` attempts per request - the worst-case wait grows to match.
 
 ## 5. Start Streamlit
 
@@ -130,6 +168,13 @@ unset.
 - **"model '...' is not available to this account"** - your API key's
   account doesn't have that model enabled; try a different
   `OPENAI_MODEL` value or check your OpenAI account's model access.
+- **"N of M field(s) skipped (time budget exhausted)"** - the stage's
+  overall budget ran out (see "Timeouts and time budgets"). First check
+  which provider actually ran: the app reads `AI_PROVIDER` only at
+  startup, so restart Streamlit from the window where you set it. With
+  OpenAI, a request usually takes a few seconds; with a local Ollama on
+  CPU it can take tens of seconds, which is what usually exhausts the
+  120-second mapping budget. Raise the budget if needed.
 - Nothing here ever requires deleting or resetting anything in git -
   if something looks wrong, just close the terminal and reopen a fresh
   one; your repository is untouched by any of these steps.

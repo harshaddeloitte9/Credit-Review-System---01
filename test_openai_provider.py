@@ -68,12 +68,16 @@ def _patch_openai_client(fake_create=None, fake_models_list=None):
             return fake_models_list()
 
     class _FakeClient:
-        def __init__(self, api_key=None, timeout=None):
+        constructed = []   # constructor kwargs of every client created (no key values recorded)
+
+        def __init__(self, api_key=None, timeout=None, max_retries=None):
+            _FakeClient.constructed.append({"timeout": timeout, "max_retries": max_retries})
             self.chat = _FakeChatNamespace()
             self.models = _FakeModels()
 
     real_openai_class = openai.OpenAI
     openai.OpenAI = _FakeClient
+    _patch_openai_client.last_fake = _FakeClient
     return real_openai_class
 
 
@@ -312,6 +316,410 @@ def test_ai_generated_values_cannot_enter_dynamic_mapping():
     finally:
         adm.check_ollama_availability = real_adm_check
         adm.call_ollama = real_adm_call
+
+
+# ============================================================
+# Provider routing through ALL THREE AI stages, request bounds, and the
+# dynamic-mapping time budget. Hard asserts (pytest). No real key and no
+# network: every provider entry point is replaced by a recorder, the only
+# socket used is a local one that never answers, and the API key lookup
+# itself is patched so a key in .streamlit/secrets.toml can never be used.
+# ============================================================
+
+import contextlib
+import os
+import socket
+import subprocess
+import threading
+import time
+
+import ai_correction_proposals as acp
+import ocr_pipeline as op
+import ocr_upload
+
+_REPO = os.path.dirname(os.path.abspath(__file__))
+_FLAGGED_FIELD = "Cash"
+
+
+def _synthetic_statement():
+    """An invented balance sheet (no real borrower data). 'Total assets' is
+    forced to NOT_FOUND so its row becomes an unclaimed candidate - the
+    other NOT_FOUND balance-sheet fields then have real candidate rows,
+    so dynamic mapping genuinely has to call the provider."""
+    def row(label, cur, prev):
+        return f"{label:<60}{cur:>18}{prev:>18}"
+
+    text = "\n".join([
+        "Statement of Standalone Audited Balance Sheet as at 31 March, 2026",
+        "Particulars" + " " * 49 + "As at".rjust(18) + "As at".rjust(18),
+        " " * 60 + "31".rjust(18) + "31".rjust(18),
+        " " * 60 + "March,".rjust(18) + "March,".rjust(18),
+        " " * 60 + "2026".rjust(18) + "2025".rjust(18),
+        "I. ASSETS", "(2) Current assets",
+        row("    (a) Current investments", 120, 110),
+        row("    (iii) Cash and cash equivalents", 25, 30),
+        row("Total current assets", 600, 560),
+        row("Total assets", 2000, 1800),
+    ])
+    extracted, _debug, meta = op.extract_financial_values(text, op.TEMPLATE_FILE)
+    extracted["Total assets"].update(validation_status="NOT_FOUND", source_line_number=None,
+                                     source_text=None, fy_current=None, fy_previous=None)
+    pairs = [(r, op.normalize_text(r)) for r in text.splitlines()]
+    pairs = [(r, n) for r, n in pairs if n]
+    lines = [n for _r, n in pairs]
+    layout = [op._normalize_preserve_layout(r) for r, _n in pairs]
+    return extracted, meta, lines, layout
+
+
+def _flag(extracted, field=_FLAGGED_FIELD):
+    ed = extracted[field]
+    return {field: av.AIValidationResult(
+        field=field, technical_status=av.AI_COMPLETED, validation_status="YEAR_MISMATCH",
+        confidence=0.6, explanation="mocked", requires_review=True,
+        fy_current=ed.get("fy_current"), fy_previous=ed.get("fy_previous"),
+        year_current_label=None, year_previous_label=None,
+        source_line_number=ed.get("source_line_number"), source_text=ed.get("source_text"),
+    )}
+
+
+def _contexts(prompt):
+    try:
+        return json.loads(prompt.split("FIELDS:\n", 1)[1])
+    except Exception:
+        return []
+
+
+class _FakeHttpResponse:
+    def __init__(self, body):
+        self.status_code = 200
+        self._body = body
+        self.text = json.dumps(body)
+
+    def json(self):
+        return self._body
+
+
+@contextlib.contextmanager
+def _provider_recorders(provider, openai_responder=lambda prompt: "{}", ollama_responder=lambda prompt: "{}",
+                        openai_available=True):
+    """Sets AI_PROVIDER and replaces BOTH providers' entry points with
+    recorders: openai_provider's two functions, and the requests calls the
+    Ollama branch makes. Yields the list of recorded calls."""
+    __tracebackhide__ = True
+    calls = []
+    real = (av.AI_PROVIDER, openai_provider.check_openai_availability, openai_provider.call_openai,
+            av.requests.get, av.requests.post)
+
+    def _openai_check(model, timeout):
+        calls.append(["openai_check", model])
+        return av.OllamaAvailability(openai_available, openai_available, [model] if openai_available else [],
+                                     "" if openai_available else "OpenAI API is not reachable (mocked)")
+
+    def _openai_call(prompt, model, timeout):
+        __tracebackhide__ = True
+        calls.append(["openai_call", model])
+        return openai_responder(prompt)
+
+    def _ollama_get(url, timeout=None, **k):
+        calls.append(["ollama_tags", None])
+        return _FakeHttpResponse({"models": [{"name": av.DEFAULT_MODEL}]})
+
+    def _ollama_post(url, json=None, timeout=None, **k):
+        __tracebackhide__ = True
+        calls.append(["ollama_generate", (json or {}).get("model")])
+        return _FakeHttpResponse({"response": ollama_responder((json or {}).get("prompt", ""))})
+
+    av.AI_PROVIDER = provider
+    openai_provider.check_openai_availability = _openai_check
+    openai_provider.call_openai = _openai_call
+    av.requests.get = _ollama_get
+    av.requests.post = _ollama_post
+    try:
+        yield calls
+    finally:
+        (av.AI_PROVIDER, openai_provider.check_openai_availability, openai_provider.call_openai,
+         av.requests.get, av.requests.post) = real
+
+
+def _run_three_stages():
+    """Runs validation, dynamic mapping and correction proposals exactly as
+    ocr_upload calls them (no model argument - each stage's own default)."""
+    extracted, meta, lines, layout = _synthetic_statement()
+    return {
+        "validation": lambda: av.validate_extracted_fields(extracted, lines, meta, layout_lines=layout),
+        "mapping": lambda: adm.map_missing_fields(extracted, lines, meta, layout_lines=layout),
+        "correction": lambda: acp.generate_correction_proposals(extracted, _flag(extracted), lines, meta, layout_lines=layout),
+    }
+
+
+def _routing_probe():
+    """Executed in a FRESH process (see _probe_in_fresh_process), so
+    AI_PROVIDER / OPENAI_MODEL are read at import time exactly as when the
+    app starts. Returns {provider, default_model, stages: {stage: calls}}."""
+    stages = {}
+    with _provider_recorders(av.AI_PROVIDER) as calls:
+        for name, run in _run_three_stages().items():
+            del calls[:]
+            run()
+            stages[name] = list(calls)
+    return {"provider": av.AI_PROVIDER, "default_model": av.DEFAULT_MODEL, "stages": stages}
+
+
+def _probe_in_fresh_process(**env_overrides):
+    env = dict(os.environ)
+    for name in ("AI_PROVIDER", "OPENAI_API_KEY", "OPENAI_MODEL", "OLLAMA_MODEL", "OPENAI_MAX_RETRIES", "OPENAI_BASE_URL"):
+        env.pop(name, None)
+    env.update(env_overrides)
+    env["PYTHONIOENCODING"] = "utf-8"
+    out = subprocess.run(
+        [sys.executable, "-c", "import json, test_openai_provider as t; print('RESULT:' + json.dumps(t._routing_probe()))"],
+        cwd=_REPO, env=env, capture_output=True, text=True, timeout=180,
+    )
+    line = next((l for l in out.stdout.splitlines() if l.startswith("RESULT:")), None)
+    assert line is not None, f"routing probe did not complete (exit {out.returncode})"
+    return json.loads(line[len("RESULT:"):])
+
+
+def _kinds(stage_calls):
+    return [kind for kind, _model in stage_calls]
+
+
+def test_default_provider_is_ollama_in_a_fresh_process():
+    result = _probe_in_fresh_process()   # AI_PROVIDER unset
+    assert result["provider"] == "ollama"
+    assert result["default_model"] == "llama3.2:latest"
+    for stage, stage_calls in result["stages"].items():
+        kinds = _kinds(stage_calls)
+        assert "ollama_tags" in kinds and "ollama_generate" in kinds, f"{stage}: Ollama path not used by default"
+        assert not any(k.startswith("openai") for k in kinds), f"{stage}: OpenAI used although not selected"
+
+
+def test_ollama_selected_explicitly_keeps_the_ollama_path():
+    result = _probe_in_fresh_process(AI_PROVIDER="ollama", OLLAMA_MODEL="ollama-routing-test")
+    assert result["provider"] == "ollama" and result["default_model"] == "ollama-routing-test"
+    for stage, stage_calls in result["stages"].items():
+        assert not any(k.startswith("openai") for k in _kinds(stage_calls)), f"{stage}: OpenAI used"
+        generate_models = {m for k, m in stage_calls if k == "ollama_generate"}
+        assert generate_models == {"ollama-routing-test"}, f"{stage}: wrong Ollama model {generate_models}"
+
+
+def test_openai_routes_all_three_stages_with_the_configured_model():
+    result = _probe_in_fresh_process(AI_PROVIDER=" OpenAI ", OPENAI_MODEL="gpt-routing-test")
+    assert result["provider"] == "openai" and result["default_model"] == "gpt-routing-test"
+    for stage in ("validation", "mapping", "correction"):
+        stage_calls = result["stages"][stage]
+        kinds = _kinds(stage_calls)
+        assert "openai_check" in kinds and "openai_call" in kinds, f"{stage}: not routed through openai_provider"
+        assert not any(k.startswith("ollama") for k in kinds), f"{stage}: an Ollama request was made"
+        assert {m for _k, m in stage_calls} == {"gpt-routing-test"}, f"{stage}: configured OpenAI model not used"
+
+
+def test_missing_openai_key_is_reported_and_never_falls_back_to_ollama():
+    extracted, meta, lines, layout = _synthetic_statement()
+    real_check = openai_provider.check_openai_availability
+    real_key = openai_provider._get_api_key
+    with _provider_recorders("openai") as calls:
+        openai_provider.check_openai_availability = real_check   # the real check, with no key available
+        openai_provider._get_api_key = lambda: None
+        try:
+            _aug, mapping, mapping_av = adm.map_missing_fields(extracted, lines, meta, layout_lines=layout)
+            validation, _presence, validation_av = av.validate_extracted_fields(extracted, lines, meta, layout_lines=layout)
+            proposals, correction_av = acp.generate_correction_proposals(extracted, _flag(extracted), lines, meta, layout_lines=layout)
+        finally:
+            openai_provider._get_api_key = real_key
+    for availability in (mapping_av, validation_av, correction_av):
+        assert availability.reachable is False and "OPENAI_API_KEY is not set" in availability.detail
+    assert all(r.technical_status == av.AI_UNAVAILABLE for r in mapping.values())
+    assert all(r.technical_status == av.AI_UNAVAILABLE for r in validation.values())
+    assert all(p.technical_status == av.AI_UNAVAILABLE for p in proposals.values())
+    assert not any(kind.startswith("ollama") for kind, _m in calls), "fell back to Ollama"
+    assert ocr_upload.ai_stage_outcome(mapping, mapping_av, "n/a", report_partial=True)[0] == "unavailable"
+
+
+def test_openai_request_failure_uses_existing_error_status():
+    extracted, meta, lines, layout = _synthetic_statement()
+    import httpx2
+    timeout_error = openai.APITimeoutError(request=httpx2.Request("POST", "https://api.openai.com/v1/chat/completions"))
+
+    def _raise_timeout(**k):
+        raise timeout_error
+
+    real_call = openai_provider.call_openai
+    real_key = openai_provider._get_api_key
+    with _provider_recorders("openai") as calls:
+        openai_provider.call_openai = real_call   # the real call, failing inside the (fake) SDK client
+        openai_provider._get_api_key = lambda: "sk-test-not-real"
+        real_client = _patch_openai_client(fake_create=_raise_timeout)
+        try:
+            _aug, mapping, mapping_av = adm.map_missing_fields(extracted, lines, meta, layout_lines=layout)
+            validation, _presence, _vav = av.validate_extracted_fields(extracted, lines, meta, layout_lines=layout)
+            constructed = list(_patch_openai_client.last_fake.constructed)
+        finally:
+            _restore_openai_client(real_client)
+            openai_provider._get_api_key = real_key
+    attempted = [r for r in mapping.values() if r.ai_call_made]
+    assert attempted and all(r.technical_status == av.AI_ERROR for r in attempted)
+    assert all(r.reason.startswith("OpenAI call failed: OpenAI call timed out after 120s") for r in attempted)
+    assert ocr_upload.ai_stage_outcome(mapping, mapping_av, "n/a", report_partial=True)[0] == "attempt_failed"
+    assert all(r.technical_status == av.AI_ERROR and r.explanation.startswith("OpenAI call failed:") for r in validation.values())
+    assert not any(kind.startswith("ollama") for kind, _m in calls), "fell back to Ollama"
+    assert constructed and all(c["max_retries"] == 0 for c in constructed), "SDK retries must be off by default"
+
+
+@contextlib.contextmanager
+def _silent_local_endpoint():
+    """A local TCP endpoint that accepts connections and never answers."""
+    __tracebackhide__ = True
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(20)
+    accepted = []
+
+    def _accept():
+        while True:
+            try:
+                conn, _ = srv.accept()
+                accepted.append(conn)
+            except OSError:
+                return
+
+    threading.Thread(target=_accept, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{srv.getsockname()[1]}/v1", accepted
+    finally:
+        srv.close()
+        for conn in accepted:
+            conn.close()
+
+
+def test_openai_request_is_bounded_by_its_timeout():
+    real_key = openai_provider._get_api_key
+    real_base = os.environ.get("OPENAI_BASE_URL")
+    real_retries = os.environ.pop("OPENAI_MAX_RETRIES", None)
+    openai_provider._get_api_key = lambda: "sk-test-not-real"
+    try:
+        with _silent_local_endpoint() as (url, accepted):
+            os.environ["OPENAI_BASE_URL"] = url
+            # One untimed warm-up request first: the first OpenAI call in a
+            # process pays one-time SDK setup (building the first HTTP client
+            # and lazily importing the chat module - ~0.6s measured, more on a
+            # loaded machine) before anything is sent. That is not part of
+            # the request timeout, which is what this test bounds.
+            try:
+                openai_provider.call_openai("warm-up", model="gpt-4o-mini", timeout=1)
+            except av.OllamaCallError:
+                pass
+            del accepted[:]
+            started = time.monotonic()
+            try:
+                openai_provider.call_openai("prompt", model="gpt-4o-mini", timeout=1)
+                raise AssertionError("a silent endpoint must time out")
+            except av.OllamaCallError as exc:
+                elapsed = time.monotonic() - started
+                assert "timed out after 1s" in str(exc)
+            assert len(accepted) == 1, f"default must be a single attempt, saw {len(accepted)}"
+            assert elapsed < 2.5, f"a 1s request took {elapsed:.1f}s"
+
+            os.environ["OPENAI_MAX_RETRIES"] = "1"   # opt-in retries are honoured and reported
+            del accepted[:]
+            try:
+                openai_provider.call_openai("prompt", model="gpt-4o-mini", timeout=1)
+            except av.OllamaCallError as exc:
+                assert "per attempt, 2 attempts" in str(exc)
+            assert len(accepted) == 2
+        for bad in ("abc", "-3"):
+            os.environ["OPENAI_MAX_RETRIES"] = bad
+            assert openai_provider._max_retries() == 0
+    finally:
+        openai_provider._get_api_key = real_key
+        os.environ.pop("OPENAI_MAX_RETRIES", None)
+        if real_retries is not None:
+            os.environ["OPENAI_MAX_RETRIES"] = real_retries
+        if real_base is None:
+            os.environ.pop("OPENAI_BASE_URL", None)
+        else:
+            os.environ["OPENAI_BASE_URL"] = real_base
+
+
+def _no_candidate_responder(prompt):
+    return json.dumps({"results": [
+        {"field": c["field"], "status": "NO_CANDIDATE_FOUND", "confidence": 0.0, "reason": "mocked",
+         "selected_line_number": None, "evidence_line_numbers": []}
+        for c in _contexts(prompt)
+    ]})
+
+
+def test_mapping_budget_marks_unstarted_batches_skipped():
+    extracted, meta, lines, layout = _synthetic_statement()
+    sent = []
+
+    def _responder(prompt):
+        sent.append([c["field"] for c in _contexts(prompt)])
+        return _no_candidate_responder(prompt)
+
+    real_exhausted = av._budget_exhausted
+    av._budget_exhausted = lambda deadline: len(sent) >= 1   # the deadline passes during the first call
+    try:
+        with _provider_recorders("openai", openai_responder=_responder) as calls:
+            _aug, results, availability = adm.map_missing_fields(extracted, lines, meta, layout_lines=layout)
+    finally:
+        av._budget_exhausted = real_exhausted
+
+    assert sum(1 for kind, _m in calls if kind == "openai_call") == 1, "no batch may start after the deadline"
+    first_batch = set(sent[0])
+    for field, r in results.items():
+        if field in first_batch:
+            assert r.technical_status == av.AI_COMPLETED and r.ai_call_made, f"{field}: completed result lost"
+    skipped = [r for r in results.values() if r.technical_status == av.AI_SKIPPED]
+    assert skipped, "fixture: later batches must exist"
+    assert all("time budget" in r.reason and not r.ai_call_made for r in skipped)
+    assert ocr_upload.ai_stage_outcome(results, availability, "n/a", report_partial=True)[0] == "partial"
+
+    real_budget = adm.DYNAMIC_MAPPING_TIME_BUDGET_SECONDS
+    adm.DYNAMIC_MAPPING_TIME_BUDGET_SECONDS = 0.0
+    try:
+        with _provider_recorders("openai", openai_responder=_responder) as calls:
+            _aug, results, availability = adm.map_missing_fields(extracted, lines, meta, layout_lines=layout)
+    finally:
+        adm.DYNAMIC_MAPPING_TIME_BUDGET_SECONDS = real_budget
+    assert not any(kind == "openai_call" for kind, _m in calls), "a zero budget must start no batch"
+    assert all(r.technical_status == av.AI_SKIPPED for r in results.values())
+    assert ocr_upload.ai_stage_outcome(results, availability, "n/a", report_partial=True)[0] == "skipped"
+
+
+def test_evidence_and_schema_checks_unchanged_under_openai():
+    extracted, meta, lines, layout = _synthetic_statement()
+    unshown_line = 10 ** 6
+
+    def _responder(prompt):
+        results = []
+        for c in _contexts(prompt):
+            if "candidate_rows" in c:   # dynamic mapping: cite a row it was never shown
+                results.append({"field": c["field"], "status": "CANDIDATE_FOUND", "confidence": 0.95, "reason": "mocked",
+                                "selected_line_number": unshown_line, "evidence_line_numbers": [unshown_line]})
+            elif "target_row" in c:     # validation: a confirmation citing evidence it was never shown
+                results.append({"field": c["field"], "status": "CONFIRMED", "confidence": 0.95,
+                                "evidence_line_numbers": [unshown_line], "evidence_values": [123456789],
+                                "explanation": "mocked", "requires_review": False})
+        return json.dumps({"results": results})
+
+    with _provider_recorders("openai", openai_responder=_responder) as calls:
+        augmented, mapping, _mav = adm.map_missing_fields(extracted, lines, meta, layout_lines=layout)
+        validation, _presence, _vav = av.validate_extracted_fields(extracted, lines, meta, layout_lines=layout)
+    assert any(kind == "openai_call" for kind, _m in calls)
+
+    attempted = [f for f, r in mapping.items() if r.ai_call_made]
+    assert attempted
+    for field in attempted:
+        assert mapping[field].mapping_status == "MAPPED_BUT_REJECTED", f"{field}: unshown row was not rejected"
+        assert augmented[field]["validation_status"] == "NOT_FOUND", f"{field}: a rejected mapping populated the field"
+    assert not any(ed.get("validation_status") in ("AI_MAPPED", "HUMAN_APPROVED_CORRECTION") for ed in augmented.values())
+
+    completed = [r for r in validation.values() if r.technical_status == av.AI_COMPLETED]
+    assert completed
+    for r in completed:
+        assert r.evidence_grounded is False and r.requires_review is True and r.confidence <= 0.3, \
+            f"{r.field}: ungrounded evidence was trusted"
 
 
 def main():
